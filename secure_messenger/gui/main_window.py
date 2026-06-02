@@ -39,6 +39,7 @@ class WatekKlienta(QThread):
     sygnal_blad       = pyqtSignal(str)
     sygnal_polaczony  = pyqtSignal(bool)
     sygnal_bezpieczny = pyqtSignal(bool)
+    sygnal_rozlaczony = pyqtSignal()   # emitowany gdy polaczenie sie konczy
 
     def __init__(self, nazwa: str, port: int = 9999):
         super().__init__()
@@ -64,6 +65,9 @@ class WatekKlienta(QThread):
                 self.sygnal_bezpieczny.emit(aktualny)
                 self._poprzedni_tryb = aktualny
             self.msleep(100)
+
+        # Petla sie skonczyla — polaczenie utracone lub zamkniete
+        self.sygnal_rozlaczony.emit()
 
     def _na_status(self, s: str) -> None:
         self.sygnal_status.emit(s)
@@ -371,6 +375,17 @@ class _PasekGorny(QWidget):
         self.btn_polacz.setFixedHeight(34)
         layout.addWidget(self.btn_polacz)
 
+        # Przycisk Rozlacz
+        self.btn_rozlacz = QPushButton("Rozlacz")
+        self.btn_rozlacz.setFont(QFont("Segoe UI", 10))
+        self.btn_rozlacz.setStyleSheet(
+            "background: #e74c3c; color: white; border: none; "
+            "padding: 5px 14px; border-radius: 4px;"
+        )
+        self.btn_rozlacz.setFixedHeight(34)
+        self.btn_rozlacz.setEnabled(False)
+        layout.addWidget(self.btn_rozlacz)
+
         # Wymiana kluczy (tylko Bob)
         if rola == 'bob':
             self.combo_bity = QComboBox()
@@ -411,12 +426,17 @@ class _PasekGorny(QWidget):
                 "background: #27ae60; color: white; padding: 3px 10px; "
                 "border-radius: 10px; margin: 0 4px;"
             )
+            self.btn_polacz.setEnabled(False)
+            self.btn_rozlacz.setEnabled(True)
         else:
             self.badge_pol.setText("ROZLACZONA" if self.rola == "alice" else "ROZLACZONY")
             self.badge_pol.setStyleSheet(
                 "background: #e74c3c; color: white; padding: 3px 10px; "
                 "border-radius: 10px; margin: 0 4px;"
             )
+            self.btn_polacz.setEnabled(True)
+            self.btn_polacz.setText("Polacz")
+            self.btn_rozlacz.setEnabled(False)
 
     def ustaw_bezpieczny(self, bezpieczny: bool) -> None:
         if bezpieczny:
@@ -489,6 +509,7 @@ class OknoKlienta(QMainWindow):
 
     def _podpnij_sygnaly(self) -> None:
         self.pasek.btn_polacz.clicked.connect(self._polacz)
+        self.pasek.btn_rozlacz.clicked.connect(self._rozlacz)
         self.czat.btn_wyslij.clicked.connect(self._wyslij)
         self.czat.pole_wiad.returnPressed.connect(self._wyslij)
         self.bench.btn_start.clicked.connect(self._uruchom_benchmarki)
@@ -511,6 +532,7 @@ class OknoKlienta(QMainWindow):
         self._moj_watek.sygnal_blad.connect(self._na_blad)
         self._moj_watek.sygnal_wiadomosc.connect(self._na_wiadomosc)
         self._moj_watek.sygnal_bezpieczny.connect(self._na_bezpieczny)
+        self._moj_watek.sygnal_rozlaczony.connect(self._na_rozlaczenie)
         self._moj_watek.start()
 
     def _inicjuj_wymiane(self) -> None:
@@ -538,8 +560,6 @@ class OknoKlienta(QMainWindow):
             if self.rola == 'bob' and self.pasek.btn_wymiana:
                 self.pasek.btn_wymiana.setEnabled(True)
         else:
-            self.pasek.btn_polacz.setEnabled(True)
-            self.pasek.btn_polacz.setText("Polacz")
             self.krypto.dodaj_krok("!", "Blad polaczenia z serwerem")
 
     def _na_status(self, s: str) -> None:
@@ -579,6 +599,29 @@ class OknoKlienta(QMainWindow):
     def _na_wiadomosc(self, nadawca: str, tresc: str) -> None:
         """Odebrana wiadomosc od DRUGIEJ strony — wyswietl u odbiorcy."""
         self.czat.dodaj_wiadomosc(nadawca.capitalize(), tresc, self._kolor_oni)
+
+    def _rozlacz(self) -> None:
+        if self._moj_watek and self._moj_watek.klient:
+            self._moj_watek.klient.rozlacz()
+        self.krypto.dodaj_krok("INFO", "Polaczenie zamkniete przez uzytkownika")
+        self._reset_stanu()
+
+    def _na_rozlaczenie(self) -> None:
+        """Wywoływany gdy wątek sieciowy konczy petle (utrata polaczenia)."""
+        if self._polaczony:
+            self.krypto.dodaj_krok("INFO", "Polaczenie z serwerem utracone")
+        self._reset_stanu()
+
+    def _reset_stanu(self) -> None:
+        """Przywraca UI do stanu 'rozlaczony' — umozliwia ponowne polaczenie."""
+        self._polaczony = False
+        self._bezpieczny = False
+        self.pasek.ustaw_polaczony(False)
+        self.pasek.ustaw_bezpieczny(False)
+        if self.pasek.btn_wymiana:
+            self.pasek.btn_wymiana.setEnabled(False)
+        self.czat.ustaw_aktywny(False)
+        self.krypto.ustaw_secure_mode(False)
 
     # ------------------------------------------------------------------
     # WYSYLANIE

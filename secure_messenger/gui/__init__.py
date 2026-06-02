@@ -1,0 +1,1 @@
+# Pakiet interfejsu graficznego

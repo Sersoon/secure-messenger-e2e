@@ -1,30 +1,37 @@
 """
 Serwer-router wiadomości — prosty przekaźnik TCP dla Alice i Boba.
 
-Architektura:
-    - Serwer nasłuchuje na jednym porcie TCP
-    - Dwaj klienci łączą się i rejestrują jako "alice" lub "bob"
-    - Każda wiadomość od Alice → przekazana do Boba (i odwrotnie)
-    - Serwer NIE deszyfruje wiadomości — widzi tylko zaszyfrowane pakiety
+Normalny tryb:
+    Serwer przeźroczyście przekazuje zaszyfrowane pakiety.
+    NIC nie deszyfruje — widzi tylko bity.
 
-Protokół rejestracji (tekst):
-    Klient po połączeniu wysyła: "REGISTER:<nazwa>\n"  (np. "REGISTER:alice\n")
-    Serwer odpowiada:            "OK\n"
+Tryb Eve (MITM):
+    Checkbox w GUI serwera włącza tryb MITM.
+    Eve przechwytuje klucz pub Boba, wysyła Alice swój klucz,
+    odczytuje klucze sesji AES+HMAC i re-szyfruje je dla Boba.
+    Po wymianie kluczy Eve może czytać wszystkie wiadomości.
 
-Protokół wiadomości (binarny):
-    Każdy pakiet poprzedzony 4-bajtowym nagłówkiem długości (big-endian):
-    [4 B dlugosc_pakietu | N B pakiet]
-    Serwer odczytuje nagłówek, następnie N bajtów i przekazuje do drugiej strony.
+Tryb Replay:
+    Serwer przechwytuje pierwszy pakiet MSG i przechowuje go.
+    Przycisk "Wyslij Replay" wysyła go ponownie → klient wykrywa nonce.
 
-Serwer działa w osobnym wątku (threading.Thread), aby nie blokować GUI.
+Protokół rejestracji:
+    Klient → Serwer: "REGISTER:alice\\n" lub "REGISTER:bob\\n"
+    Serwer → Klient: "OK\\n"
+
+Format pakietów (binarny):
+    [4 B dlugosc big-endian | N B payload]
+    payload dla RSA_PUB:  b"RSA_PUB:<n_hex>:<e_hex>\\n"
+    payload dla RSA_KEYS: b"RSA_KEYS:<enc_aes_hex>:<enc_hmac_hex>\\n"
+    payload dla MSG:      b"MSG:" + binary_data
 """
 
 import socket
 import threading
 import logging
-from typing import Optional
+import datetime
+from typing import Optional, Callable
 
-# Konfiguracja logowania po polsku
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [SERWER] %(message)s',
@@ -34,59 +41,123 @@ logger = logging.getLogger(__name__)
 
 DOMYSLNY_HOST: str = '127.0.0.1'
 DOMYSLNY_PORT: int = 9999
-ROZMIAR_BUFORA: int = 4096
-NAGLOWEK_DLUGOSCI: int = 4  # 4 bajty big-endian na długość pakietu
+NAGLOWEK_DLUGOSCI: int = 4
 
 
 class SerwerRoutera:
     """
-    Prosty serwer TCP przekazujący wiadomości między Alice i Bobem.
-
-    Obsługuje dokładnie 2 klientów jednocześnie.
-    Po rozłączeniu jednego — sesja kończy się, obaj mogą połączyć ponownie.
+    Serwer TCP przekazujący pakiety między Alice i Bobem.
+    Opcjonalnie: tryb Eve (MITM + Replay) sterowany z GUI.
     """
 
-    def __init__(self, host: str = DOMYSLNY_HOST, port: int = DOMYSLNY_PORT):
+    def __init__(
+        self,
+        host: str = DOMYSLNY_HOST,
+        port: int = DOMYSLNY_PORT,
+        on_log: Optional[Callable[[str], None]] = None,
+        on_klienci: Optional[Callable[[list], None]] = None,
+        on_pakiet_przechwycony: Optional[Callable[[], None]] = None,
+    ):
         self.host = host
         self.port = port
-        self._socket: Optional[socket.socket] = None
-        self._watki: list[threading.Thread] = []
 
-        # Słownik aktywnych połączeń: nazwa -> socket
+        # Callbacki dla GUI serwera (wywoływane z wątków sieciowych)
+        self._on_log = on_log or (lambda m: None)
+        self._on_klienci = on_klienci or (lambda lst: None)
+        self._on_pakiet_przechwycony = on_pakiet_przechwycony or (lambda: None)
+
+        self._socket: Optional[socket.socket] = None
         self._klienci: dict[str, socket.socket] = {}
         self._blokada = threading.Lock()
-
-        # Flaga sterująca pętlą nasłuchu
         self._dziala = threading.Event()
+
+        # Stan Eve (MITM + Replay)
+        self._mitm_wlaczony: bool = False
+        self._replay_wlaczony: bool = False
+        self._eve_klucze_rsa = None                          # KluczeRSA Eve
+        self._bob_klucz_pub: Optional[tuple[int, int]] = None  # przechwycony
+        self._eve_klucz_aes: Optional[bytes] = None
+        self._eve_klucz_hmac: Optional[bytes] = None
+        self._przechwycony_pakiet: Optional[tuple[str, bytes]] = None  # (cel, dane)
+
+    # ------------------------------------------------------------------
+    # LOGOWANIE
+    # ------------------------------------------------------------------
+
+    def _log(self, msg: str) -> None:
+        ts = datetime.datetime.now().strftime('%H:%M:%S')
+        logger.info(msg)
+        self._on_log(f"[{ts}] {msg}")
+
+    def _powiadom_klientow(self) -> None:
+        with self._blokada:
+            lista = list(self._klienci.keys())
+        self._on_klienci(lista)
+
+    # ------------------------------------------------------------------
+    # TRYB EVE — sterowanie z GUI
+    # ------------------------------------------------------------------
+
+    def ustaw_mitm(self, wlaczony: bool) -> None:
+        """Włącza/wyłącza tryb MITM. Generuje klucze Eve przy włączeniu."""
+        self._mitm_wlaczony = wlaczony
+        if wlaczony:
+            from secure_messenger.crypto.rsa import generuj_klucze_rsa
+            self._log("EVE: generuje klucze RSA-512 (klucz do podstawienia)...")
+            self._eve_klucze_rsa = generuj_klucze_rsa(512)
+            self._log("EVE gotowa! Czekam na wymiane kluczy Alice↔Bob aby je przejac...")
+        else:
+            self._eve_klucze_rsa = None
+            self._bob_klucz_pub = None
+            self._eve_klucz_aes = None
+            self._eve_klucz_hmac = None
+            self._log("Tryb MITM wylaczony")
+
+    def ustaw_replay(self, wlaczony: bool) -> None:
+        """Włącza/wyłącza tryb Replay — przechwytuje pierwszy MSG."""
+        self._replay_wlaczony = wlaczony
+        if wlaczony:
+            self._przechwycony_pakiet = None
+            self._log("Tryb Replay wlaczony — czekam na pierwszy pakiet MSG...")
+        else:
+            self._przechwycony_pakiet = None
+            self._log("Tryb Replay wylaczony")
+
+    def wyslij_replay(self) -> bool:
+        """Wysyła przechwycony pakiet MSG ponownie → odbiorca wykrywa stary nonce."""
+        if self._przechwycony_pakiet is None:
+            return False
+        cel, dane = self._przechwycony_pakiet
+        self._log(f"EVE REPLAY: wysylam stary pakiet do '{cel}' ({len(dane)} B) !")
+        self._wyslij_do(cel, dane)
+        return True
+
+    @property
+    def przechwycony_pakiet_gotowy(self) -> bool:
+        return self._przechwycony_pakiet is not None
 
     # ------------------------------------------------------------------
     # URUCHAMIANIE I ZATRZYMYWANIE
     # ------------------------------------------------------------------
 
     def uruchom(self, w_tle: bool = True) -> None:
-        """
-        Uruchamia serwer na skonfigurowanym hoście i porcie.
-
-        Parametry:
-            w_tle — True: serwer działa w osobnym wątku (domyślnie)
-                    False: blokuje bieżący wątek (tryb deweloperski)
-        """
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._socket.bind((self.host, self.port))
         self._socket.listen(5)
+        self._socket.settimeout(1.0)
         self._dziala.set()
-        logger.info(f"Serwer nasłuchuje na {self.host}:{self.port}")
+        self._log(f"Serwer nasluchuje na {self.host}:{self.port}")
 
         if w_tle:
-            watek = threading.Thread(target=self._petla_nasluch, daemon=True, name="Serwer-Nasluch")
+            watek = threading.Thread(
+                target=self._petla_nasluch, daemon=True, name="Serwer-Nasluch"
+            )
             watek.start()
-            self._watki.append(watek)
         else:
             self._petla_nasluch()
 
     def zatrzymaj(self) -> None:
-        """Zatrzymuje serwer i zamyka wszystkie połączenia."""
         self._dziala.clear()
         if self._socket:
             try:
@@ -94,48 +165,39 @@ class SerwerRoutera:
             except OSError:
                 pass
         with self._blokada:
-            for nazwa, conn in list(self._klienci.items()):
+            for conn in list(self._klienci.values()):
                 try:
                     conn.close()
                 except OSError:
                     pass
             self._klienci.clear()
-        logger.info("Serwer zatrzymany")
+        self._log("Serwer zatrzymany")
 
     # ------------------------------------------------------------------
     # PĘTLA NASŁUCHU
     # ------------------------------------------------------------------
 
     def _petla_nasluch(self) -> None:
-        """Główna pętla akceptująca nowe połączenia."""
         while self._dziala.is_set():
             try:
-                self._socket.settimeout(1.0)  # timeout, żeby móc sprawdzić flagę
-                try:
-                    conn, adres = self._socket.accept()
-                except socket.timeout:
-                    continue
-                logger.info(f"Nowe połączenie od {adres}")
-                watek = threading.Thread(
-                    target=self._obsluz_klienta,
-                    args=(conn, adres),
-                    daemon=True,
-                    name=f"Klient-{adres}"
-                )
-                watek.start()
-                self._watki.append(watek)
+                conn, adres = self._socket.accept()
+            except socket.timeout:
+                continue
             except OSError:
-                break  # socket zamknięty — czas na wyjście
+                break
+            watek = threading.Thread(
+                target=self._obsluz_klienta,
+                args=(conn, adres),
+                daemon=True,
+                name=f"Klient-{adres[1]}"
+            )
+            watek.start()
 
     # ------------------------------------------------------------------
     # OBSŁUGA KLIENTA
     # ------------------------------------------------------------------
 
     def _odbierz_dokladnie(self, conn: socket.socket, ile: int) -> Optional[bytes]:
-        """
-        Odbiera dokładnie `ile` bajtów z gniazda.
-        Zwraca None przy zerwaniu połączenia.
-        """
         bufor = b''
         while len(bufor) < ile:
             try:
@@ -143,60 +205,50 @@ class SerwerRoutera:
             except OSError:
                 return None
             if not fragment:
-                return None  # połączenie zerwane
+                return None
             bufor += fragment
         return bufor
 
     def _obsluz_klienta(self, conn: socket.socket, adres: tuple) -> None:
-        """
-        Obsługuje jednego klienta: rejestracja, a następnie pętla przekazywania pakietów.
-        """
         nazwa = None
         try:
-            # Krok 1: Rejestracja klienta
             nazwa = self._rejestruj(conn)
             if nazwa is None:
                 return
 
-            logger.info(f"Klient '{nazwa}' zarejestrowany ({adres})")
+            self._log(f"{nazwa.capitalize()} polaczony ({adres[0]}:{adres[1]})")
+            self._powiadom_klientow()
 
-            # Krok 2: Pętla odbioru i przekazywania pakietów
             while self._dziala.is_set():
-                # Odczytaj 4-bajtowy nagłówek długości
                 naglowek = self._odbierz_dokladnie(conn, NAGLOWEK_DLUGOSCI)
                 if naglowek is None:
                     break
-
                 dlugosc = int.from_bytes(naglowek, 'big')
-                if dlugosc == 0 or dlugosc > 65536:
-                    logger.warning(f"Nieprawidłowa długość pakietu od '{nazwa}': {dlugosc}")
+                if dlugosc == 0 or dlugosc > 2_000_000:
+                    self._log(f"Nieprawidlowa dlugosc pakietu od '{nazwa}': {dlugosc}")
                     break
-
-                # Odczytaj właściwy pakiet
                 pakiet = self._odbierz_dokladnie(conn, dlugosc)
                 if pakiet is None:
                     break
 
-                logger.info(f"Pakiet od '{nazwa}': {dlugosc} B — przekazuję")
+                self._log(f"{nazwa}: pakiet {dlugosc} B → routing")
                 self._przekaz(nazwa, naglowek + pakiet)
 
         except Exception as e:
-            logger.error(f"Błąd obsługi klienta '{nazwa}': {e}")
+            if self._dziala.is_set():
+                self._log(f"Blad obslugi '{nazwa}': {e}")
         finally:
             if nazwa:
                 with self._blokada:
                     self._klienci.pop(nazwa, None)
-                logger.info(f"Klient '{nazwa}' rozłączony")
+                self._log(f"{nazwa.capitalize()} rozlaczony")
+                self._powiadom_klientow()
             try:
                 conn.close()
             except OSError:
                 pass
 
     def _rejestruj(self, conn: socket.socket) -> Optional[str]:
-        """
-        Obsługuje rejestrację klienta: oczekuje "REGISTER:<nazwa>\n".
-        Zwraca nazwę klienta lub None przy błędzie.
-        """
         try:
             dane = b''
             while b'\n' not in dane:
@@ -204,54 +256,145 @@ class SerwerRoutera:
                 if not fragment:
                     return None
                 dane += fragment
-
             linia = dane.decode('utf-8').strip()
             if not linia.startswith('REGISTER:'):
                 conn.sendall(b'BLAD:Nieznane polecenie\n')
                 return None
-
             nazwa = linia.split(':', 1)[1].lower().strip()
             if nazwa not in ('alice', 'bob'):
                 conn.sendall(b'BLAD:Nazwa musi byc alice lub bob\n')
                 return None
-
             with self._blokada:
                 if nazwa in self._klienci:
                     conn.sendall(b'BLAD:Nazwa zajeta\n')
                     return None
                 self._klienci[nazwa] = conn
-
             conn.sendall(b'OK\n')
             return nazwa
-
         except Exception as e:
-            logger.error(f"Błąd rejestracji: {e}")
+            self._log(f"Blad rejestracji: {e}")
             return None
 
-    def _przekaz(self, od: str, dane: bytes) -> None:
-        """
-        Przekazuje pakiet do drugiego klienta (alice→bob lub bob→alice).
-        """
-        cel = 'bob' if od == 'alice' else 'alice'
-        with self._blokada:
-            conn_cel = self._klienci.get(cel)
+    # ------------------------------------------------------------------
+    # ROUTING Z TRYBEM EVE
+    # ------------------------------------------------------------------
 
-        if conn_cel is None:
-            logger.warning(f"Cel '{cel}' niedostępny — pakiet odrzucony")
+    def _przekaz(self, od: str, dane: bytes) -> None:
+        """Przekazuje pakiet — opcjonalnie przez Eve (MITM/Replay)."""
+        cel = 'bob' if od == 'alice' else 'alice'
+        payload = dane[NAGLOWEK_DLUGOSCI:]
+
+        # MITM: przechwytuj klucz publiczny Boba
+        if self._mitm_wlaczony and od == 'bob' and payload.startswith(b'RSA_PUB:'):
+            self._mitm_przechwyc_klucz_pub(payload, cel)
             return
 
+        # MITM: przechwytuj zaszyfrowane klucze sesji od Alice
+        if self._mitm_wlaczony and od == 'alice' and payload.startswith(b'RSA_KEYS:'):
+            self._mitm_przechwyc_klucze_sesji(payload, cel)
+            return
+
+        # MITM: czytaj wiadomosci przez Eve (jesli ma klucze)
+        if self._mitm_wlaczony and payload.startswith(b'MSG:') and self._eve_klucz_aes:
+            self._mitm_deszyfruj_msg(od, payload[4:])
+
+        # Replay: zapamietaj pierwszy pakiet MSG
+        if self._replay_wlaczony and payload.startswith(b'MSG:'):
+            if self._przechwycony_pakiet is None:
+                self._przechwycony_pakiet = (cel, dane)
+                self._log(
+                    f"EVE: przechwycono pakiet MSG od '{od}' ({len(dane)} B) "
+                    f"— gotowy do replay!"
+                )
+                self._on_pakiet_przechwycony()
+
+        self._wyslij_do(cel, dane)
+
+    def _wyslij_do(self, cel: str, dane: bytes) -> None:
+        with self._blokada:
+            conn_cel = self._klienci.get(cel)
+        if conn_cel is None:
+            self._log(f"Cel '{cel}' niedostepny — pakiet odrzucony")
+            return
         try:
             conn_cel.sendall(dane)
         except OSError as e:
-            logger.error(f"Błąd wysyłania do '{cel}': {e}")
+            self._log(f"Blad wysylania do '{cel}': {e}")
+
+    def _opakuj(self, dane: bytes) -> bytes:
+        return len(dane).to_bytes(NAGLOWEK_DLUGOSCI, 'big') + dane
+
+    # ------------------------------------------------------------------
+    # MITM — pomocnicze
+    # ------------------------------------------------------------------
+
+    def _mitm_przechwyc_klucz_pub(self, payload: bytes, cel: str) -> None:
+        """Eve przechwytuje klucz pub Boba i wysyła Alice swój własny."""
+        try:
+            tekst = payload.decode().strip()
+            czesc = tekst[len('RSA_PUB:'):]
+            n_hex, e_hex = czesc.split(':', 1)
+            self._bob_klucz_pub = (int(n_hex, 16), int(e_hex, 16))
+            bity = self._bob_klucz_pub[0].bit_length()
+            self._log(f"EVE: PRZECHWYCONO klucz pub Boba RSA-{bity}!")
+
+            # Wyslij Alice KLUCZ EVE zamiast Boba
+            n_eve, e_eve = self._eve_klucze_rsa.klucz_publiczny
+            nowy = f"RSA_PUB:{hex(n_eve)}:{hex(e_eve)}\n".encode()
+            self._wyslij_do(cel, self._opakuj(nowy))
+            self._log("EVE: wyslano Alice SWOJ klucz pub (podszywanie pod Boba)")
+        except Exception as e:
+            self._log(f"MITM blad klucza pub: {e}")
+
+    def _mitm_przechwyc_klucze_sesji(self, payload: bytes, cel: str) -> None:
+        """Eve odczytuje klucze AES+HMAC, re-szyfruje kluczem Boba i przesyla."""
+        try:
+            from secure_messenger.crypto.rsa import deszyfruj_klucze_sesji, szyfruj_klucze_sesji
+            tekst = payload.decode().strip()
+            czesc = tekst[len('RSA_KEYS:'):]
+            enc_aes_hex, enc_hmac_hex = czesc.split(':', 1)
+
+            # Odszyfruj kluczem prywatnym Eve
+            k_aes, k_hmac = deszyfruj_klucze_sesji(
+                bytes.fromhex(enc_aes_hex),
+                bytes.fromhex(enc_hmac_hex),
+                self._eve_klucze_rsa.klucz_prywatny,
+            )
+            self._eve_klucz_aes = k_aes
+            self._eve_klucz_hmac = k_hmac
+            self._log(
+                f"EVE: ODCZYTANO klucze sesji! "
+                f"AES={k_aes.hex()[:16]}... HMAC={k_hmac.hex()[:16]}..."
+            )
+
+            # Re-zaszyfruj kluczem pub Boba i wyslij dalej
+            if self._bob_klucz_pub:
+                enc_aes_new, enc_hmac_new = szyfruj_klucze_sesji(k_aes, k_hmac, self._bob_klucz_pub)
+                nowy = f"RSA_KEYS:{enc_aes_new.hex()}:{enc_hmac_new.hex()}\n".encode()
+                self._wyslij_do(cel, self._opakuj(nowy))
+                self._log("EVE: przekazano klucze Bobowi (re-zaszyfrowane jego kluczem pub)")
+                self._log(">>> MITM ZAKONCZONY SUKCESEM — Eve zna AES i HMAC! <<<")
+        except Exception as e:
+            self._log(f"MITM blad kluczy sesji: {e}")
+
+    def _mitm_deszyfruj_msg(self, od: str, pakiet: bytes) -> None:
+        """Eve odczytuje plaintext wiadomosci (dzieki skradzionym kluczom)."""
+        try:
+            from secure_messenger.crypto.aes_cbc import rozpakuj_pakiet
+            _, _, plaintext = rozpakuj_pakiet(pakiet, self._eve_klucz_aes, self._eve_klucz_hmac)
+            self._log(f"EVE czyta [{od.upper()}]: \"{plaintext.decode('utf-8', errors='replace')}\"")
+        except Exception:
+            pass  # moze sie nie udac przy pierwszym pakiecie (rozne session_id)
+
+    # ------------------------------------------------------------------
+    # WŁAŚCIWOŚCI
+    # ------------------------------------------------------------------
 
     @property
     def czy_dziala(self) -> bool:
-        """Zwraca True gdy serwer jest aktywny."""
         return self._dziala.is_set()
 
     @property
     def polaczeni_klienci(self) -> list[str]:
-        """Lista aktualnie połączonych klientów."""
         with self._blokada:
             return list(self._klienci.keys())

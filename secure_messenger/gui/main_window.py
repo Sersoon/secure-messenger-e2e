@@ -393,7 +393,10 @@ class ZakladkaBenchmarki(QWidget):
                     Qt.AlignmentFlag.AlignLeft if c == 0 else Qt.AlignmentFlag.AlignCenter
                 )
                 if "RSA" in wiersz[0]:
-                    item.setBackground(QColor("#fef9e7"))
+                    item.setBackground(QColor("#292103"))
+                    item.setForeground(QColor("#fbbf24"))
+                else:
+                    item.setForeground(QColor("#e5e7eb"))
                 self.tabela.setItem(r, c, item)
         self.lbl_czas.setText(f"Czas calkowity: {raport.czas_calkowity_s:.1f}s")
 
@@ -449,10 +452,19 @@ class ZakladkaSecurityLab(QWidget):
 
         # --- Demo bez nonce ---
         grp_demo = QGroupBox("Demo: Replay BEZ nonce — 3/3 przechodzi (dlaczego nonce jest konieczny)")
-        grp_demo.setStyleSheet(
-            "QGroupBox { font-weight: bold; color: #c0392b; "
-            "border: 1px solid #e74c3c; }"
-        )
+        grp_demo.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold; color: #fca5a5;
+                border: 2px solid #7f1d1d;
+                border-radius: 8px;
+                margin-top: 12px; padding-top: 10px;
+                background: #1a0808;
+            }
+            QGroupBox::title {
+                color: #fca5a5; left: 8px;
+                padding: 0 5px; background: #1a0808;
+            }
+        """)
         lay_d = QVBoxLayout(grp_demo)
         self.btn_bez_nonce = QPushButton("Uruchom demo — pokazuje atak ktory by przeszedl bez nonce")
         lay_d.addWidget(self.btn_bez_nonce)
@@ -492,10 +504,10 @@ class ZakladkaSecurityLab(QWidget):
 
     def _kolor(self, opis: str) -> str:
         if any(s in opis for s in ("WYKRY", "SKUTECZNA", "POPRAWNY", "ochrona")):
-            return "#27ae60"
+            return "#4ade80"
         if any(s in opis for s in ("UDANY", "Eve", "REPLAY", "przeszl", "BRAK", "MITM")):
-            return "#c0392b"
-        return "#2c3e50"
+            return "#f87171"
+        return "#9ca3af"
 
     def dodaj_krok(self, log: QTextEdit, nr: str, opis: str) -> None:
         kolor = self._kolor(opis)
@@ -513,7 +525,7 @@ class _PasekGorny(QWidget):
         super().__init__()
         self.rola = rola
         self.setFixedHeight(56)
-        self.setStyleSheet("background: #2c3e50;")
+        self.setStyleSheet("background: #0f172a; border-bottom: 1px solid #374151;")
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 6, 12, 6)
@@ -522,7 +534,7 @@ class _PasekGorny(QWidget):
         lbl_rola = QLabel(rola.upper())
         lbl_rola.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         lbl_rola.setStyleSheet(
-            "color: #2980b9;" if rola == "alice" else "color: #8e44ad;"
+            "color: #60a5fa; background: transparent;" if rola == "alice" else "color: #c084fc; background: transparent;"
         )
         lbl_rola.setFixedWidth(70)
         layout.addWidget(lbl_rola)
@@ -540,20 +552,26 @@ class _PasekGorny(QWidget):
         # Przycisk Polacz
         self.btn_polacz = QPushButton("Polacz")
         self.btn_polacz.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self.btn_polacz.setStyleSheet(
-            "background: #27ae60; color: white; border: none; "
-            "padding: 5px 14px; border-radius: 4px;"
-        )
+        self.btn_polacz.setStyleSheet("""
+            QPushButton          { background:#16a34a; color:white; border:none;
+                                   padding:5px 14px; border-radius:5px; font-weight:bold; }
+            QPushButton:hover    { background:#15803d; }
+            QPushButton:pressed  { background:#166534; }
+            QPushButton:disabled { background:#4b5563; color:#9ca3af; }
+        """)
         self.btn_polacz.setFixedHeight(34)
         layout.addWidget(self.btn_polacz)
 
         # Przycisk Rozlacz
         self.btn_rozlacz = QPushButton("Rozlacz")
         self.btn_rozlacz.setFont(QFont("Segoe UI", 10))
-        self.btn_rozlacz.setStyleSheet(
-            "background: #e74c3c; color: white; border: none; "
-            "padding: 5px 14px; border-radius: 4px;"
-        )
+        self.btn_rozlacz.setStyleSheet("""
+            QPushButton          { background:#dc2626; color:white; border:none;
+                                   padding:5px 14px; border-radius:5px; }
+            QPushButton:hover    { background:#b91c1c; }
+            QPushButton:pressed  { background:#991b1b; }
+            QPushButton:disabled { background:#4b5563; color:#9ca3af; }
+        """)
         self.btn_rozlacz.setFixedHeight(34)
         self.btn_rozlacz.setEnabled(False)
         layout.addWidget(self.btn_rozlacz)
@@ -564,13 +582,31 @@ class _PasekGorny(QWidget):
             self.combo_bity.addItems(["RSA-512", "RSA-1024", "RSA-2048"])
             self.combo_bity.setCurrentIndex(1)
             self.combo_bity.setFixedHeight(34)
-            self.combo_bity.setStyleSheet("background: #34495e; color: white; padding: 2px 6px;")
+            self.combo_bity.setStyleSheet("""
+                QComboBox {
+                    background: #374151; color: #f9fafb;
+                    border: 1px solid #4b5563; border-radius: 5px;
+                    padding: 2px 8px;
+                }
+                QComboBox:hover { background: #4b5563; border-color: #6b7280; }
+                QComboBox::drop-down { width: 16px; border-left: 1px solid #4b5563; }
+                QComboBox QAbstractItemView {
+                    background: #1f2937; color: #f9fafb;
+                    border: 1px solid #4b5563;
+                    selection-background-color: #374151;
+                    selection-color: #f9fafb;
+                    outline: none;
+                }
+            """)
             self.btn_wymiana = QPushButton("Wymien klucze RSA")
             self.btn_wymiana.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-            self.btn_wymiana.setStyleSheet(
-                "background: #8e44ad; color: white; border: none; "
-                "padding: 5px 14px; border-radius: 4px;"
-            )
+            self.btn_wymiana.setStyleSheet("""
+                QPushButton          { background:#7c3aed; color:white; border:none;
+                                       padding:5px 14px; border-radius:5px; font-weight:bold; }
+                QPushButton:hover    { background:#6d28d9; }
+                QPushButton:pressed  { background:#5b21b6; }
+                QPushButton:disabled { background:#4b5563; color:#9ca3af; }
+            """)
             self.btn_wymiana.setFixedHeight(34)
             self.btn_wymiana.setEnabled(False)
             layout.addWidget(self.combo_bity)
@@ -578,9 +614,6 @@ class _PasekGorny(QWidget):
         else:
             self.combo_bity = None
             self.btn_wymiana = None
-            lbl_auto = QLabel("Alice automatycznie wysle klucze sesji po odebraniu klucza RSA Boba")
-            lbl_auto.setStyleSheet("color: #bdc3c7; font-size: 9px;")
-            layout.addWidget(lbl_auto)
 
     def _badge(self, tekst: str, kolor: str) -> QLabel:
         lbl = QLabel(tekst)

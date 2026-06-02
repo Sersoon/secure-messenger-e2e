@@ -111,23 +111,35 @@ class OknoSerwera(QMainWindow):
         # Separtor
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #bdc3c7;")
+        sep.setStyleSheet("color: #374151;")
         layout.addWidget(sep)
 
         # Tryb Eve
         grp_eve = QGroupBox("Tryb Eve (ataki)")
-        grp_eve.setStyleSheet(
-            "QGroupBox { font-weight: bold; color: #c0392b; "
-            "border: 2px solid #e74c3c; border-radius: 4px; margin-top: 8px; padding-top: 8px;}"
-            "QGroupBox::title { color: #c0392b; left: 8px; }"
-        )
+        grp_eve.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold; color: #fca5a5;
+                border: 2px solid #7f1d1d;
+                border-radius: 8px;
+                margin-top: 12px; padding-top: 10px;
+                background: #1a0808;
+            }
+            QGroupBox::title {
+                color: #fca5a5; left: 10px;
+                padding: 0 5px; background: #1a0808;
+            }
+        """)
         lay_e = QVBoxLayout(grp_eve)
 
         # MITM checkbox
         self.chk_mitm = QCheckBox(
             "Włącz MITM — Eve przechwytuje klucze RSA i czyta wiadomosci"
         )
-        self.chk_mitm.setStyleSheet("font-weight: bold; color: #c0392b;")
+        self.chk_mitm.setStyleSheet("""
+            QCheckBox          { font-weight: bold; color: #fca5a5; }
+            QCheckBox:disabled { color: #6b7280; }
+            QCheckBox::indicator:checked { background: #dc2626; border-color: #dc2626; }
+        """)
         self.chk_mitm.toggled.connect(self._na_mitm)
         lay_e.addWidget(self.chk_mitm)
 
@@ -136,18 +148,22 @@ class OknoSerwera(QMainWindow):
             "  Alice szyfruje klucze AES+HMAC dla Eve (nie Boba).\n"
             "  Eve re-szyfruje i przekazuje — Alice i Bob nie wiedzą."
         )
-        lbl_mitm_opis.setStyleSheet("color: #7f8c8d; font-size: 9px; margin-left: 20px;")
+        lbl_mitm_opis.setStyleSheet("color: #6b7280; font-size: 9px; margin-left: 20px;")
         lay_e.addWidget(lbl_mitm_opis)
 
         # Linia oddzielajaca
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("color: #fadbd8;")
+        sep2.setStyleSheet("color: #7f1d1d;")
         lay_e.addWidget(sep2)
 
         # Replay checkbox + przycisk
         self.chk_replay = QCheckBox("Włącz Replay — przechwytuj pakiety MSG")
-        self.chk_replay.setStyleSheet("font-weight: bold; color: #c0392b;")
+        self.chk_replay.setStyleSheet("""
+            QCheckBox          { font-weight: bold; color: #fca5a5; }
+            QCheckBox:disabled { color: #6b7280; }
+            QCheckBox::indicator:checked { background: #dc2626; border-color: #dc2626; }
+        """)
         self.chk_replay.toggled.connect(self._na_replay)
         lay_e.addWidget(self.chk_replay)
 
@@ -156,9 +172,23 @@ class OknoSerwera(QMainWindow):
         lbl_replay_opis.setStyleSheet("color: #7f8c8d; font-size: 9px;")
         self.btn_replay = QPushButton("Wyslij Replay!")
         self.btn_replay.setEnabled(False)
-        self.btn_replay.setStyleSheet(
-            "background-color: #e74c3c; color: white; font-weight: bold; padding: 3px 8px;"
-        )
+        self._STYL_REPLAY_OFF = """
+            QPushButton {
+                background: #6b7280; color: #d1d5db;
+                font-weight: bold; padding: 4px 10px;
+                border: 1px solid #4b5563; border-radius: 5px;
+            }
+        """
+        self._STYL_REPLAY_ON = """
+            QPushButton {
+                background: #dc2626; color: white;
+                font-weight: bold; padding: 4px 10px;
+                border: 2px solid #991b1b; border-radius: 5px;
+            }
+            QPushButton:hover   { background: #b91c1c; }
+            QPushButton:pressed { background: #991b1b; }
+        """
+        self.btn_replay.setStyleSheet(self._STYL_REPLAY_OFF)
         self.btn_replay.clicked.connect(self._na_wyslij_replay)
         lay_replay_btn.addWidget(lbl_replay_opis)
         lay_replay_btn.addStretch()
@@ -201,7 +231,7 @@ class OknoSerwera(QMainWindow):
     # ------------------------------------------------------------------
 
     def _na_log(self, msg: str) -> None:
-        kolor = "#c0392b" if "EVE" in msg or "MITM" in msg or "REPLAY" in msg or "ATAK" in msg else "#2c3e50"
+        kolor = "#f87171" if "EVE" in msg or "MITM" in msg or "REPLAY" in msg or "ATAK" in msg else "#9ca3af"
         self.log.append(f'<span style="color:{kolor};">{msg}</span>')
         self.log.moveCursor(QTextCursor.MoveOperation.End)
 
@@ -237,10 +267,7 @@ class OknoSerwera(QMainWindow):
 
     def _na_pakiet_przechwycony(self) -> None:
         self.btn_replay.setEnabled(True)
-        self.btn_replay.setStyleSheet(
-            "background-color: #e74c3c; color: white; font-weight: bold; "
-            "padding: 3px 8px; border: 2px solid #922b21;"
-        )
+        self.btn_replay.setStyleSheet(self._STYL_REPLAY_ON)
 
     def _na_mitm(self, wlaczony: bool) -> None:
         self.chk_mitm.setEnabled(False)
@@ -262,6 +289,7 @@ class OknoSerwera(QMainWindow):
         self._serwer.ustaw_replay(wlaczony)
         if not wlaczony:
             self.btn_replay.setEnabled(False)
+            self.btn_replay.setStyleSheet(self._STYL_REPLAY_OFF)
 
     def _na_wyslij_replay(self) -> None:
         ok = self._serwer.wyslij_replay()

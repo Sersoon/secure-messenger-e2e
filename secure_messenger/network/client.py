@@ -40,6 +40,7 @@ NAGLOWEK_DLUGOSCI: int = 4  # bajty nagłówka długości pakietu
 TYP_RSA_PUB  = b'RSA_PUB:'   # Bob → Alice: klucz publiczny RSA
 TYP_RSA_KEYS = b'RSA_KEYS:'  # Alice → Bob: zaszyfrowane klucze sesji
 TYP_MSG      = b'MSG:'       # wiadomość zaszyfrowana AES+HMAC
+TYP_STEG     = b'STEG_IMAGE:'  # obraz PPM ze steganogramem (kanał edukacyjny)
 
 
 class KlientMessenger:
@@ -63,6 +64,7 @@ class KlientMessenger:
         on_wiadomosc: Optional[Callable[[str, str], None]] = None,
         on_status: Optional[Callable[[str], None]] = None,
         on_blad: Optional[Callable[[str], None]] = None,
+        on_steg_image: Optional[Callable[[str, bytes], None]] = None,
     ):
         self.nazwa = nazwa.lower()
         self.host = host
@@ -71,7 +73,8 @@ class KlientMessenger:
         # Callbacki (podpinane przez GUI)
         self._on_wiadomosc = on_wiadomosc or (lambda n, t: None)
         self._on_status    = on_status    or (lambda s: None)
-        self._on_blad      = on_blad      or (lambda e: None)
+        self._on_blad       = on_blad       or (lambda e: None)
+        self._on_steg_image = on_steg_image or (lambda n, d: None)
 
         self._logger = logging.getLogger(f"Klient-{self.nazwa}")
 
@@ -99,6 +102,8 @@ class KlientMessenger:
 
         # Ostatni wysłany pakiet krypto (do wyświetlenia IV/ciphertext/HMAC w GUI)
         self.ostatni_pakiet_krypto: Optional[bytes] = None
+        # Ostatni odebrany obraz steganograficzny (surowe bajty PPM)
+        self.ostatni_odebrany_steg: Optional[bytes] = None
 
     # ------------------------------------------------------------------
     # WŁAŚCIWOŚCI
@@ -293,6 +298,40 @@ class KlientMessenger:
             self._on_blad(blad)
             return False
 
+    def wyslij_steg_image(self, ppm_dane: bytes) -> bool:
+        """
+        Wysyła obraz PPM ze steganogramem do drugiej strony przez serwer.
+
+        Steganografia to oddzielny kanał edukacyjny — nie wymaga trybu bezpiecznego,
+        wystarczy aktywne połączenie TCP z serwerem.
+
+        Format pakietu: STEG_IMAGE:<nazwa_nadawcy>\\n<bajty_ppm>
+
+        Parametry:
+            ppm_dane — surowe bajty pliku PPM P6
+
+        Zwraca:
+            True — wysyłka udana, False — brak połączenia lub błąd
+        """
+        if not self.polaczony:
+            self._on_blad("[STEG] Brak połączenia — najpierw połącz się z serwerem")
+            return False
+        try:
+            cel = 'bob' if self.nazwa == 'alice' else 'alice'
+            naglowek_steg = f"{self.nazwa}\n".encode()
+            payload = TYP_STEG + naglowek_steg + ppm_dane
+            self._wyslij_surowy(payload)
+            self._logger.info(
+                f"[STEG] Obraz wysłany do '{cel}' ({len(ppm_dane)} B)"
+            )
+            self._on_status(f"[STEG] Obraz wysłany do {cel.capitalize()}")
+            return True
+        except Exception as e:
+            blad = f"[STEG] Błąd wysyłania obrazu: {e}"
+            self._logger.error(blad)
+            self._on_blad(blad)
+            return False
+
     # ------------------------------------------------------------------
     # WĄTEK ODBIORCZY
     # ------------------------------------------------------------------
@@ -335,6 +374,11 @@ class KlientMessenger:
         # Zaszyfrowana wiadomość AES+HMAC
         if dane.startswith(TYP_MSG):
             self._odbierz_wiadomosc(dane[len(TYP_MSG):])
+            return
+
+        # Obraz PPM ze steganogramem
+        if dane.startswith(TYP_STEG):
+            self._odbierz_steg_image(dane[len(TYP_STEG):])
             return
 
         self._logger.warning(f"Nieznany typ pakietu: {dane[:20]}")
@@ -409,6 +453,22 @@ class KlientMessenger:
 
         except ValueError as e:
             self._on_blad(f"Błąd weryfikacji pakietu: {e}")
+
+    def _odbierz_steg_image(self, payload: bytes) -> None:
+        """Odbiera obraz PPM ze steganogramem wysłany przez drugą stronę."""
+        try:
+            idx = payload.index(b'\n')
+            nadawca = payload[:idx].decode('utf-8', errors='replace').strip()
+            ppm_dane = payload[idx + 1:]
+            self.ostatni_odebrany_steg = ppm_dane
+            cel = 'bob' if self.nazwa == 'alice' else 'alice'
+            self._logger.info(
+                f"[STEG] Odebrano obraz od '{nadawca}' ({len(ppm_dane)} B)"
+            )
+            self._on_status(f"[STEG] Odebrano obraz od {nadawca.capitalize()}")
+            self._on_steg_image(nadawca, ppm_dane)
+        except Exception as e:
+            self._on_blad(f"[STEG] Błąd odbioru obrazu: {e}")
 
     # ------------------------------------------------------------------
     # NARZĘDZIA SIECIOWE

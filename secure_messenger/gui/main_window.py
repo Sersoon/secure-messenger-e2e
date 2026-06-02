@@ -14,12 +14,14 @@ Brak duplikatow wiadomosci:
 """
 
 import threading
+import os
+import tempfile
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QLineEdit, QGroupBox,
     QTableWidget, QTableWidgetItem, QComboBox, QSplitter,
-    QProgressBar, QHeaderView
+    QProgressBar, QHeaderView, QScrollArea
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QTextCursor
@@ -40,7 +42,8 @@ class WatekKlienta(QThread):
     sygnal_blad       = pyqtSignal(str)
     sygnal_polaczony  = pyqtSignal(bool)
     sygnal_bezpieczny = pyqtSignal(bool)
-    sygnal_rozlaczony = pyqtSignal()   # emitowany gdy polaczenie sie konczy
+    sygnal_rozlaczony = pyqtSignal()
+    sygnal_steg_image = pyqtSignal(str, bytes)   # (nadawca, bajty_ppm)
 
     def __init__(
         self,
@@ -61,9 +64,10 @@ class WatekKlienta(QThread):
             # Podpinamy callbacki pod sygnaly TEGO watku, zeby wiadomosci trafialy
             # do aktualnego okna.
             self.klient = self._istniejacy_klient
-            self.klient._on_wiadomosc = lambda n, t: self.sygnal_wiadomosc.emit(n, t)
-            self.klient._on_status    = lambda s: self._na_status(s)
-            self.klient._on_blad      = lambda e: self.sygnal_blad.emit(e)
+            self.klient._on_wiadomosc  = lambda n, t: self.sygnal_wiadomosc.emit(n, t)
+            self.klient._on_status     = lambda s: self._na_status(s)
+            self.klient._on_blad       = lambda e: self.sygnal_blad.emit(e)
+            self.klient._on_steg_image = lambda n, d: self.sygnal_steg_image.emit(n, d)
         else:
             self.klient = KlientMessenger(
                 nazwa=self.nazwa,
@@ -71,6 +75,7 @@ class WatekKlienta(QThread):
                 on_wiadomosc=lambda n, t: self.sygnal_wiadomosc.emit(n, t),
                 on_status=lambda s: self._na_status(s),
                 on_blad=lambda e: self.sygnal_blad.emit(e),
+                on_steg_image=lambda n, d: self.sygnal_steg_image.emit(n, d),
             )
         ok = self.klient.polacz()
         self.sygnal_polaczony.emit(ok)
@@ -516,6 +521,392 @@ class ZakladkaSecurityLab(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# ZAKŁADKA: STEGANOGRAFIA LSB
+# ---------------------------------------------------------------------------
+
+class ZakladkaSteganografia(QWidget):
+    """Demo steganografii LSB — ukrywanie tekstu w obrazie PPM krok po kroku."""
+
+    sygnal_wyslij_steg = pyqtSignal(bytes)  # emitowany gdy user kliknie "Ukryj i wyslij"
+
+    def __init__(self):
+        super().__init__()
+        self._sciezka_oryg: str | None = None
+        self._sciezka_stego: str | None = None
+        self._odebrany_ppm: bytes | None = None   # ostatnio odebrany obraz przez siec
+        self._odebrany_od:  str   | None = None   # nadawca odebranego obrazu
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        tytul = QLabel("Steganografia LSB — Ukrywanie danych w obrazach PPM")
+        tytul.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        layout.addWidget(tytul)
+
+        opis = QLabel(
+            "Każdy piksel (R, G, B) = 3 bajty. Zmieniamy wyłącznie ostatni bit (LSB) "
+            "każdego bajtu — różnica wartości o ±1 jest niewidoczna gołym okiem."
+        )
+        opis.setStyleSheet("color: #7f8c8d; font-size: 9px;")
+        opis.setWordWrap(True)
+        layout.addWidget(opis)
+
+        # Krok 1 — tworzenie obrazu
+        grp1 = QGroupBox("Krok 1 — Obraz nośny (format PPM P6, bez kompresji)")
+        lay1 = QVBoxLayout(grp1)
+        row1 = QHBoxLayout()
+        self.combo_rozmiar = QComboBox()
+        self.combo_rozmiar.addItems([
+            "64×64 px  (pojemność ~1.5 KB)",
+            "128×128 px  (~6 KB)",
+            "256×256 px  (~24 KB)",
+        ])
+        self.btn_stworz = QPushButton("Stwórz losowy obraz")
+        self.btn_stworz.setFixedWidth(170)
+        row1.addWidget(QLabel("Rozmiar:"))
+        row1.addWidget(self.combo_rozmiar)
+        row1.addStretch()
+        row1.addWidget(self.btn_stworz)
+        lay1.addLayout(row1)
+        self.lbl_info_obrazu = QLabel("— kliknij 'Stwórz losowy obraz' —")
+        self.lbl_info_obrazu.setStyleSheet("color: #9ca3af; font-size: 9px;")
+        lay1.addWidget(self.lbl_info_obrazu)
+        layout.addWidget(grp1)
+
+        # Krok 2 — ukrywanie
+        grp2 = QGroupBox("Krok 2 — Ukryj wiadomość w obrazie")
+        lay2 = QVBoxLayout(grp2)
+        row2 = QHBoxLayout()
+        self.pole_wiad = QLineEdit("Tajna wiadomosc: klucz_AES=1A2B3C4D5E6F7890")
+        self.btn_ukryj = QPushButton("Ukryj w obrazie")
+        self.btn_ukryj.setFixedWidth(140)
+        self.btn_ukryj.setEnabled(False)
+        row2.addWidget(QLabel("Wiadomosc:"))
+        row2.addWidget(self.pole_wiad)
+        row2.addWidget(self.btn_ukryj)
+        lay2.addLayout(row2)
+        self.lbl_wynik_ukrycia = QLabel("")
+        self.lbl_wynik_ukrycia.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        lay2.addWidget(self.lbl_wynik_ukrycia)
+        layout.addWidget(grp2)
+
+        # Krok 3 — odczyt
+        grp3 = QGroupBox("Krok 3 — Odczytaj wiadomosc ze steganogramu")
+        lay3 = QVBoxLayout(grp3)
+        row3 = QHBoxLayout()
+        self.btn_odczytaj = QPushButton("Odczytaj wiadomosc")
+        self.btn_odczytaj.setFixedWidth(160)
+        self.btn_odczytaj.setEnabled(False)
+        self.pole_odczyt = QLineEdit()
+        self.pole_odczyt.setReadOnly(True)
+        self.pole_odczyt.setFont(QFont("Consolas", 9))
+        self.pole_odczyt.setPlaceholderText("— tutaj pojawi sie odczytana wiadomosc —")
+        row3.addWidget(self.btn_odczytaj)
+        row3.addWidget(self.pole_odczyt)
+        lay3.addLayout(row3)
+        self.lbl_wynik_odczytu = QLabel("")
+        self.lbl_wynik_odczytu.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        lay3.addWidget(self.lbl_wynik_odczytu)
+        layout.addWidget(grp3)
+
+        # Krok 4 — wizualizacja LSB
+        grp4 = QGroupBox("Krok 4 — Wizualizacja LSB (pierwsze 16 bajtow pikseli w formacie binarnym)")
+        lay4 = QVBoxLayout(grp4)
+        opis4 = QLabel(
+            "Ostatni bit (LSB) każdego bajtu zaznaczony kolorem — "
+            "<span style='color:#ef4444; font-weight:bold;'>czerwony = 1</span> &nbsp; "
+            "<span style='color:#9ca3af;'>szary = 0</span> &nbsp; "
+            "Pozostałe 7 bitów jest niezmienione."
+        )
+        opis4.setStyleSheet("font-size: 9px;")
+        lay4.addWidget(opis4)
+
+        row4 = QHBoxLayout()
+
+        grp_przed = QGroupBox("Oryginal (przed ukryciem)")
+        lay_przed = QVBoxLayout(grp_przed)
+        self.txt_przed = QTextEdit()
+        self.txt_przed.setReadOnly(True)
+        self.txt_przed.setMaximumHeight(115)
+        self.txt_przed.setFont(QFont("Consolas", 8))
+        lay_przed.addWidget(self.txt_przed)
+
+        grp_po = QGroupBox("Steganogram (po ukryciu)")
+        lay_po = QVBoxLayout(grp_po)
+        self.txt_po = QTextEdit()
+        self.txt_po.setReadOnly(True)
+        self.txt_po.setMaximumHeight(115)
+        self.txt_po.setFont(QFont("Consolas", 8))
+        lay_po.addWidget(self.txt_po)
+
+        row4.addWidget(grp_przed)
+        row4.addWidget(grp_po)
+        lay4.addLayout(row4)
+
+        self.lbl_diff = QLabel("")
+        self.lbl_diff.setFont(QFont("Segoe UI", 9))
+        lay4.addWidget(self.lbl_diff)
+        layout.addWidget(grp4)
+
+        # Krok 5 — wysyłanie i odbieranie przez sieć TCP
+        grp5 = QGroupBox("Krok 5 — Wysylanie i odbieranie przez siec TCP")
+        lay5 = QVBoxLayout(grp5)
+
+        row5a = QHBoxLayout()
+        self.lbl_polaczenie_steg = QLabel("Brak polaczenia z serwerem")
+        self.lbl_polaczenie_steg.setStyleSheet("color: #9ca3af; font-size: 9px;")
+        row5a.addWidget(self.lbl_polaczenie_steg)
+        row5a.addStretch()
+        lay5.addLayout(row5a)
+
+        row5b = QHBoxLayout()
+        self.btn_ukryj_i_wyslij = QPushButton("Ukryj i wyslij do drugiej strony")
+        self.btn_ukryj_i_wyslij.setFixedWidth(240)
+        self.btn_ukryj_i_wyslij.setEnabled(False)
+        self.btn_ukryj_i_wyslij.setStyleSheet("""
+            QPushButton          { background:#0369a1; color:white; border:none;
+                                   padding:5px 12px; border-radius:5px; font-weight:bold; }
+            QPushButton:hover    { background:#0284c7; }
+            QPushButton:pressed  { background:#075985; }
+            QPushButton:disabled { background:#4b5563; color:#9ca3af; }
+        """)
+        self.lbl_wynik_wysylki = QLabel("")
+        self.lbl_wynik_wysylki.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        row5b.addWidget(self.btn_ukryj_i_wyslij)
+        row5b.addWidget(self.lbl_wynik_wysylki)
+        row5b.addStretch()
+        lay5.addLayout(row5b)
+
+        row5c = QHBoxLayout()
+        self.btn_odczytaj_odebrany = QPushButton("Odczytaj odebrany obraz")
+        self.btn_odczytaj_odebrany.setFixedWidth(190)
+        self.btn_odczytaj_odebrany.setEnabled(False)
+        self.pole_odczyt_odebrany = QLineEdit()
+        self.pole_odczyt_odebrany.setReadOnly(True)
+        self.pole_odczyt_odebrany.setFont(QFont("Consolas", 9))
+        self.pole_odczyt_odebrany.setPlaceholderText("— odczytana wiadomosc z odebranego obrazu —")
+        row5c.addWidget(self.btn_odczytaj_odebrany)
+        row5c.addWidget(self.pole_odczyt_odebrany)
+        lay5.addLayout(row5c)
+
+        self.lbl_odebrany_status = QLabel("")
+        self.lbl_odebrany_status.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        lay5.addWidget(self.lbl_odebrany_status)
+        layout.addWidget(grp5)
+
+        layout.addStretch()
+
+        self.btn_stworz.clicked.connect(self._stworz_obraz)
+        self.btn_ukryj.clicked.connect(self._ukryj)
+        self.btn_odczytaj.clicked.connect(self._odczytaj)
+        self.btn_ukryj_i_wyslij.clicked.connect(self._ukryj_i_wyslij)
+        self.btn_odczytaj_odebrany.clicked.connect(self._odczytaj_odebrany_steg)
+
+    # ------------------------------------------------------------------
+
+    def _stworz_obraz(self) -> None:
+        from secure_messenger.steganography.lsb import stworz_ppm, oblicz_pojemnosc
+
+        rozmiary = [(64, 64), (128, 128), (256, 256)]
+        w, h = rozmiary[self.combo_rozmiar.currentIndex()]
+        tmpdir = tempfile.mkdtemp(prefix="stego_")
+        self._sciezka_oryg = os.path.join(tmpdir, "oryg.ppm")
+        self._sciezka_stego = os.path.join(tmpdir, "stego.ppm")
+
+        stworz_ppm(self._sciezka_oryg, w, h)
+        info = oblicz_pojemnosc(self._sciezka_oryg)
+
+        self.lbl_info_obrazu.setText(
+            f"Obraz {info['szerokosc']}×{info['wysokosc']} px  |  "
+            f"Piksele: {info['piksele']:,}  |  "
+            f"Pojemnosc: {info['pojemnosc_opis']}  "
+            f"({info['pojemnosc_bajtow'] * 8:,} bitow nosnych)"
+        )
+        self.lbl_info_obrazu.setStyleSheet("color: #4ade80; font-size: 9px;")
+        self.btn_ukryj.setEnabled(True)
+        self.btn_odczytaj.setEnabled(False)
+        for lbl in (self.lbl_wynik_ukrycia, self.lbl_wynik_odczytu, self.lbl_diff):
+            lbl.clear()
+        self.pole_odczyt.clear()
+        self.txt_po.clear()
+        self._wypelnij_wizualizacje(self._sciezka_oryg, self.txt_przed)
+
+    def _ukryj(self) -> None:
+        if not self._sciezka_oryg:
+            return
+        from secure_messenger.steganography.lsb import ukryj_wiadomosc
+
+        wiad = self.pole_wiad.text().encode('utf-8')
+        try:
+            bity = ukryj_wiadomosc(self._sciezka_oryg, self._sciezka_stego, wiad)
+            rozmiar_obrazu = os.path.getsize(self._sciezka_stego)
+            self.lbl_wynik_ukrycia.setText(
+                f"Ukryto {len(wiad)} B ({len(wiad) * 8} bitow)  |  "
+                f"Zmodyfikowano {bity} LSB z {rozmiar_obrazu} bajtow obrazu  "
+                f"({bity / rozmiar_obrazu * 100:.2f}% bajtow tknietych)"
+            )
+            self.lbl_wynik_ukrycia.setStyleSheet("color: #4ade80; font-weight: bold;")
+            self.btn_odczytaj.setEnabled(True)
+            self._wypelnij_wizualizacje(self._sciezka_stego, self.txt_po)
+            self._pokaz_diff()
+        except (ValueError, FileNotFoundError) as e:
+            self.lbl_wynik_ukrycia.setText(f"Blad: {e}")
+            self.lbl_wynik_ukrycia.setStyleSheet("color: #f87171;")
+
+    def _odczytaj(self) -> None:
+        if not self._sciezka_stego:
+            return
+        from secure_messenger.steganography.lsb import odczytaj_wiadomosc
+
+        try:
+            dane = odczytaj_wiadomosc(self._sciezka_stego)
+            tekst = dane.decode('utf-8', errors='replace')
+            self.pole_odczyt.setText(tekst)
+            ok = tekst == self.pole_wiad.text()
+            self.lbl_wynik_odczytu.setText(
+                "Wiadomosc odczytana poprawnie — identyczna z oryginalem!"
+                if ok else "Uwaga: roznica miedzy oryginalem a odczytem"
+            )
+            self.lbl_wynik_odczytu.setStyleSheet(
+                "color: #4ade80;" if ok else "color: #f87171;"
+            )
+        except Exception as e:
+            self.lbl_wynik_odczytu.setText(f"Blad odczytu: {e}")
+            self.lbl_wynik_odczytu.setStyleSheet("color: #f87171;")
+
+    def _fragment_pikseli(self, sciezka: str, n: int) -> bytes | None:
+        try:
+            with open(sciezka, 'rb') as f:
+                f.readline()        # P6
+                linia = f.readline()
+                while linia.startswith(b'#'):
+                    linia = f.readline()
+                f.readline()        # 255
+                return f.read(n)
+        except Exception:
+            return None
+
+    def _wypelnij_wizualizacje(self, sciezka: str, widget: QTextEdit) -> None:
+        dane = self._fragment_pikseli(sciezka, 16)
+        if dane is None:
+            return
+        parts = ['<div style="font-family:Consolas; font-size:8pt; line-height:1.9;">']
+        for i, b in enumerate(dane):
+            bity_str = format(b, '08b')
+            kolor = '#ef4444' if bity_str[-1] == '1' else '#9ca3af'
+            parts.append(
+                f'<span style="color:#d1d5db;">{bity_str[:7]}</span>'
+                f'<span style="color:{kolor}; font-weight:bold;">{bity_str[7]}</span>'
+            )
+            parts.append('<br>' if (i + 1) % 4 == 0 else '&nbsp;')
+        parts.append('</div>')
+        widget.setHtml(''.join(parts))
+
+    # ------------------------------------------------------------------
+    # SIEĆ — sterowanie z OknoKlienta
+    # ------------------------------------------------------------------
+
+    def ustaw_polaczony(self, polaczony: bool) -> None:
+        """Włącza/wyłącza przycisk wysyłania w zależności od stanu połączenia."""
+        if polaczony:
+            self.lbl_polaczenie_steg.setText(
+                "Polaczono z serwerem — mozesz wyslac obraz steganograficzny"
+            )
+            self.lbl_polaczenie_steg.setStyleSheet("color: #4ade80; font-size: 9px;")
+            self.btn_ukryj_i_wyslij.setEnabled(True)
+        else:
+            self.lbl_polaczenie_steg.setText("Brak polaczenia z serwerem")
+            self.lbl_polaczenie_steg.setStyleSheet("color: #9ca3af; font-size: 9px;")
+            self.btn_ukryj_i_wyslij.setEnabled(False)
+
+    def na_odebrany_steg(self, nadawca: str, ppm_dane: bytes) -> None:
+        """Wywoływana przez OknoKlienta gdy przyszedł pakiet STEG_IMAGE."""
+        self._odebrany_ppm = ppm_dane
+        self._odebrany_od  = nadawca
+        self.lbl_odebrany_status.setText(
+            f"[STEG] Odebrano obraz od {nadawca.capitalize()} "
+            f"({len(ppm_dane)} B) — kliknij 'Odczytaj odebrany obraz'"
+        )
+        self.lbl_odebrany_status.setStyleSheet("color: #60a5fa; font-weight: bold;")
+        self.btn_odczytaj_odebrany.setEnabled(True)
+        self.pole_odczyt_odebrany.clear()
+
+    def _ukryj_i_wyslij(self) -> None:
+        """Tworzy obraz 128×128, ukrywa wiadomość z Kroku 2 i emituje sygnał wysyłania."""
+        wiad = self.pole_wiad.text().strip()
+        if not wiad:
+            self.lbl_wynik_wysylki.setText("Wpisz wiadomosc w polu powyzej (Krok 2)")
+            self.lbl_wynik_wysylki.setStyleSheet("color: #f87171;")
+            return
+
+        from secure_messenger.steganography.lsb import stworz_ppm, ukryj_wiadomosc
+
+        self.lbl_wynik_wysylki.setText("[STEG] Tworzenie obrazu z ukryta wiadomoscia...")
+        self.lbl_wynik_wysylki.setStyleSheet("color: #9ca3af;")
+        try:
+            tmpdir = tempfile.mkdtemp(prefix="steg_siec_")
+            sc_oryg  = os.path.join(tmpdir, "oryg.ppm")
+            sc_stego = os.path.join(tmpdir, "stego.ppm")
+            stworz_ppm(sc_oryg, 128, 128)
+            ukryj_wiadomosc(sc_oryg, sc_stego, wiad.encode('utf-8'))
+            with open(sc_stego, 'rb') as f:
+                ppm_dane = f.read()
+            self.lbl_wynik_wysylki.setText(
+                f"[STEG] Obraz wysylany ({len(ppm_dane)} B, "
+                f"ukrytych {len(wiad.encode())} B)..."
+            )
+            self.lbl_wynik_wysylki.setStyleSheet("color: #4ade80; font-weight: bold;")
+            self.sygnal_wyslij_steg.emit(ppm_dane)
+        except Exception as e:
+            self.lbl_wynik_wysylki.setText(f"[STEG] Blad: {e}")
+            self.lbl_wynik_wysylki.setStyleSheet("color: #f87171;")
+
+    def _odczytaj_odebrany_steg(self) -> None:
+        """Odczytuje ukrytą wiadomość z ostatnio odebranego obrazu."""
+        if self._odebrany_ppm is None:
+            return
+        from secure_messenger.steganography.lsb import odczytaj_wiadomosc
+
+        try:
+            tmpdir = tempfile.mkdtemp(prefix="steg_odb_")
+            sc = os.path.join(tmpdir, "odebrany.ppm")
+            with open(sc, 'wb') as f:
+                f.write(self._odebrany_ppm)
+            dane = odczytaj_wiadomosc(sc)
+            tekst = dane.decode('utf-8', errors='replace')
+            self.pole_odczyt_odebrany.setText(tekst)
+            nadawca = (self._odebrany_od or '?').capitalize()
+            self.lbl_odebrany_status.setText(
+                f"[STEG] Odczytano ukryta wiadomosc od {nadawca}: \"{tekst[:60]}\""
+            )
+            self.lbl_odebrany_status.setStyleSheet("color: #4ade80; font-weight: bold;")
+        except Exception as e:
+            self.lbl_odebrany_status.setText(f"[STEG] Blad odczytu: {e}")
+            self.lbl_odebrany_status.setStyleSheet("color: #f87171;")
+
+    # ------------------------------------------------------------------
+
+    def _pokaz_diff(self) -> None:
+        if not (self._sciezka_oryg and self._sciezka_stego):
+            return
+        oryg  = self._fragment_pikseli(self._sciezka_oryg,  256)
+        stego = self._fragment_pikseli(self._sciezka_stego, 256)
+        if oryg is None or stego is None:
+            return
+        zmienione = sum(1 for a, b in zip(oryg, stego) if a != b)
+        tylko_lsb = all((a & 0xFE) == (b & 0xFE) for a, b in zip(oryg, stego))
+        if tylko_lsb:
+            self.lbl_diff.setText(
+                f"Analiza pierwszych {len(oryg)} bajtow: {zmienione} bajtow zmienionych, "
+                f"kazda zmiana wylacznie w bicie LSB (±1) — obraz wyglada identycznie"
+            )
+            self.lbl_diff.setStyleSheet("color: #4ade80;")
+        else:
+            self.lbl_diff.setText("Wykryto zmiany powyzej LSB!")
+            self.lbl_diff.setStyleSheet("color: #f87171;")
+
+
+# ---------------------------------------------------------------------------
 # PASEK GÓRNY (status + przyciski)
 # ---------------------------------------------------------------------------
 
@@ -702,11 +1093,17 @@ class OknoKlienta(QMainWindow):
         self.krypto   = ZakladkaKryptografia(rola)
         self.sec_lab  = ZakladkaSecurityLab()
         self.bench    = ZakladkaBenchmarki()
+        self.stego    = ZakladkaSteganografia()
+        # Zakładka steganografii w QScrollArea — zawartość jest wyższa niż minimalne okno
+        _stego_scroll = QScrollArea()
+        _stego_scroll.setWidgetResizable(True)
+        _stego_scroll.setWidget(self.stego)
 
-        self.tabs.addTab(self.czat,    "Czat")
-        self.tabs.addTab(self.krypto,  "Kryptografia / RSA Lab")
-        self.tabs.addTab(self.sec_lab, "Security Lab")
-        self.tabs.addTab(self.bench,   "Benchmarki")
+        self.tabs.addTab(self.czat,     "Czat")
+        self.tabs.addTab(self.krypto,   "Kryptografia / RSA Lab")
+        self.tabs.addTab(self.sec_lab,  "Security Lab")
+        self.tabs.addTab(self.bench,    "Benchmarki")
+        self.tabs.addTab(_stego_scroll, "Steganografia")
         main_layout.addWidget(self.tabs)
 
         self._podpnij_sygnaly()
@@ -727,6 +1124,8 @@ class OknoKlienta(QMainWindow):
         self.sec_lab.btn_replay.clicked.connect(self._uruchom_replay)
         self.sec_lab.btn_bez_nonce.clicked.connect(self._uruchom_demo_bez_nonce)
         self.sec_lab.btn_mitm.clicked.connect(self._uruchom_mitm)
+        # Steganografia — sygnał wysyłania z zakładki do klienta sieciowego
+        self.stego.sygnal_wyslij_steg.connect(self._wyslij_steg)
 
     # ------------------------------------------------------------------
     # POŁĄCZENIE
@@ -759,6 +1158,7 @@ class OknoKlienta(QMainWindow):
         self._moj_watek.sygnal_wiadomosc.connect(self._na_wiadomosc)
         self._moj_watek.sygnal_bezpieczny.connect(self._na_bezpieczny)
         self._moj_watek.sygnal_rozlaczony.connect(self._na_rozlaczenie)
+        self._moj_watek.sygnal_steg_image.connect(self._na_steg_image)
         self._moj_watek.start()
 
     def _inicjuj_wymiane(self) -> None:
@@ -780,6 +1180,7 @@ class OknoKlienta(QMainWindow):
     def _na_polaczenie(self, ok: bool) -> None:
         self._polaczony = ok
         self.pasek.ustaw_polaczony(ok)
+        self.stego.ustaw_polaczony(ok)
         if ok:
             self.pasek.btn_polacz.setText("Polaczono")
             self.krypto.dodaj_krok(self.rola[0].upper(), f"Polaczono z serwerem jako '{self.rola}'")
@@ -849,6 +1250,7 @@ class OknoKlienta(QMainWindow):
         self._bezpieczny = False
         self.pasek.ustaw_polaczony(False)
         self.pasek.ustaw_bezpieczny(False)
+        self.stego.ustaw_polaczony(False)
         if self.pasek.btn_wymiana:
             self.pasek.btn_wymiana.setEnabled(False)
         self.czat.ustaw_aktywny(False)
@@ -877,6 +1279,30 @@ class OknoKlienta(QMainWindow):
                 ct_len = int.from_bytes(p[56:60], 'big')
                 ct  = p[60:60 + ct_len]
                 self.czat.pokaz_szczegoly(iv, ct, tag)
+
+    # ------------------------------------------------------------------
+    # STEGANOGRAFIA — wysyłanie i odbieranie
+    # ------------------------------------------------------------------
+
+    def _wyslij_steg(self, ppm_dane: bytes) -> None:
+        """Wysyła obraz PPM przez klienta sieciowego po emisji sygnału z zakładki."""
+        if not (self._moj_watek and self._moj_watek.klient):
+            return
+        cel = 'bob' if self.rola == 'alice' else 'alice'
+        ok = self._moj_watek.klient.wyslij_steg_image(ppm_dane)
+        if ok:
+            self.krypto.dodaj_krok(
+                "STEG",
+                f"[STEG] Obraz wysłany do {cel.capitalize()} ({len(ppm_dane)} B)"
+            )
+
+    def _na_steg_image(self, nadawca: str, ppm_dane: bytes) -> None:
+        """Wywoływany gdy wątek Qt odbierze sygnał sygnal_steg_image."""
+        self.stego.na_odebrany_steg(nadawca, ppm_dane)
+        self.krypto.dodaj_krok(
+            "STEG",
+            f"[STEG] Odebrano obraz od {nadawca.capitalize()} ({len(ppm_dane)} B)"
+        )
 
     # ------------------------------------------------------------------
     # SECURITY LAB

@@ -26,6 +26,7 @@ from PyQt6.QtGui import QFont, QColor, QTextCursor
 
 from secure_messenger.network.client import KlientMessenger
 from secure_messenger.benchmarks.benchmark import uruchom_wszystkie_benchmarki, WynikBenchmarku
+from secure_messenger.security.attacks import AtakMITM, AtakReplay, DemoBezNonce
 
 
 # ---------------------------------------------------------------------------
@@ -41,21 +42,36 @@ class WatekKlienta(QThread):
     sygnal_bezpieczny = pyqtSignal(bool)
     sygnal_rozlaczony = pyqtSignal()   # emitowany gdy polaczenie sie konczy
 
-    def __init__(self, nazwa: str, port: int = 9999):
+    def __init__(
+        self,
+        nazwa: str,
+        port: int = 9999,
+        istniejacy_klient: "KlientMessenger | None" = None,
+    ):
         super().__init__()
         self.nazwa = nazwa
         self.port = port
+        self._istniejacy_klient = istniejacy_klient
         self.klient: KlientMessenger | None = None
         self._poprzedni_tryb = False
 
     def run(self) -> None:
-        self.klient = KlientMessenger(
-            nazwa=self.nazwa,
-            port=self.port,
-            on_wiadomosc=lambda n, t: self.sygnal_wiadomosc.emit(n, t),
-            on_status=lambda s: self._na_status(s),
-            on_blad=lambda e: self.sygnal_blad.emit(e),
-        )
+        if self._istniejacy_klient is not None:
+            # Reconnect — reuzywamy tego samego KlientMessenger (zachowane klucze sesji).
+            # Podpinamy callbacki pod sygnaly TEGO watku, zeby wiadomosci trafialy
+            # do aktualnego okna.
+            self.klient = self._istniejacy_klient
+            self.klient._on_wiadomosc = lambda n, t: self.sygnal_wiadomosc.emit(n, t)
+            self.klient._on_status    = lambda s: self._na_status(s)
+            self.klient._on_blad      = lambda e: self.sygnal_blad.emit(e)
+        else:
+            self.klient = KlientMessenger(
+                nazwa=self.nazwa,
+                port=self.port,
+                on_wiadomosc=lambda n, t: self.sygnal_wiadomosc.emit(n, t),
+                on_status=lambda s: self._na_status(s),
+                on_blad=lambda e: self.sygnal_blad.emit(e),
+            )
         ok = self.klient.polacz()
         self.sygnal_polaczony.emit(ok)
 
@@ -76,6 +92,57 @@ class WatekKlienta(QThread):
             if aktualny != self._poprzedni_tryb:
                 self.sygnal_bezpieczny.emit(aktualny)
                 self._poprzedni_tryb = aktualny
+
+
+class WatekAtaku(QThread):
+    """Uruchamia symulacje atakow w tle (nie blokuje GUI)."""
+    sygnal_krok   = pyqtSignal(str, str)   # (numer, opis kroku)
+    sygnal_gotowy = pyqtSignal(str)        # podsumowanie wynikow
+
+    def __init__(self, rodzaj: str, parametry: dict):
+        super().__init__()
+        self.rodzaj = rodzaj
+        self.parametry = parametry
+
+    def run(self) -> None:
+        def postep(nr, opis):
+            self.sygnal_krok.emit(str(nr), opis)
+
+        if self.rodzaj == 'mitm':
+            atak = AtakMITM()
+            wynik = atak.symuluj(
+                wiadomosci_alice=self.parametry.get('wiadomosci', ['Test']),
+                modyfikacja=self.parametry.get('modyfikacja'),
+                bity_rsa=self.parametry.get('bity', 512),
+                on_postep=postep,
+            )
+            self.sygnal_gotowy.emit(
+                f"Wiadomosci Eve: {len(wynik.wiadomosci_eve)} | "
+                f"Modyfikacje: {len(wynik.wiadomosci_zmodyfikowane)} | "
+                f"MITM: {'UDANY' if wynik.sukces else 'NIEUDANY'}"
+            )
+        elif self.rodzaj == 'replay':
+            atak = AtakReplay()
+            wynik = atak.symuluj(
+                wiadomosc=self.parametry.get('wiadomosc', 'Test'),
+                ile_replay=self.parametry.get('ile_replay', 3),
+                on_postep=postep,
+            )
+            self.sygnal_gotowy.emit(
+                f"Replay prob: {wynik.pakiety_replay} | "
+                f"Wykryte: {wynik.pakiety_wykryte} | "
+                f"Ochrona: {'SKUTECZNA' if not wynik.sukces_ataku else 'NARUSZONA'}"
+            )
+        elif self.rodzaj == 'demo_bez_nonce':
+            demo = DemoBezNonce()
+            wynik = demo.symuluj_bez_ochrony(
+                wiadomosc=self.parametry.get('wiadomosc', 'Przelej 500 zl'),
+                on_postep=postep,
+            )
+            self.sygnal_gotowy.emit(
+                f"Replay BEZ nonce: {wynik['replay_udane']}/3 przeszly — "
+                f"{'BRAK OCHRONY!' if wynik['replay_udane'] > 0 else 'OK'}"
+            )
 
 
 class WatekBenchmarku(QThread):
@@ -332,6 +399,111 @@ class ZakladkaBenchmarki(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# ZAKŁADKA: SECURITY LAB (symulacje standalone z attacks.py)
+# ---------------------------------------------------------------------------
+
+class ZakladkaSecurityLab(QWidget):
+    """
+    Prezentuje trzy standalone symulacje z attacks.py:
+      1. Replay z nonce  — 0/3 przechodzi (ochrona dziala)
+      2. Replay bez nonce — 3/3 przechodzi (brak ochrony)
+      3. MITM standalone  — krok-po-kroku z logami
+    Uzupelnia live demos w oknie serwera.
+    """
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        tytul = QLabel("Security Lab — Symulacje Algorytmiczne")
+        tytul.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        layout.addWidget(tytul)
+
+        opis = QLabel(
+            "Symulacje standalone (bez sieci TCP). "
+            "Live ataki MITM i Replay sa dostepne w oknie Serwera."
+        )
+        opis.setStyleSheet("color: #7f8c8d; font-size: 9px;")
+        layout.addWidget(opis)
+
+        # --- Replay z nonce ---
+        grp_replay = QGroupBox("Replay Attack — z ochrona nonce (powinno byc 0/3)")
+        lay_r = QVBoxLayout(grp_replay)
+        ktrle_r = QHBoxLayout()
+        self.pole_wiad_replay = QLineEdit("Przelej 1000 zl na konto Ewy")
+        self.btn_replay = QPushButton("Uruchom Replay")
+        self.btn_replay.setFixedWidth(140)
+        ktrle_r.addWidget(QLabel("Wiadomosc:")); ktrle_r.addWidget(self.pole_wiad_replay)
+        ktrle_r.addWidget(self.btn_replay)
+        lay_r.addLayout(ktrle_r)
+        self.log_replay = QTextEdit()
+        self.log_replay.setReadOnly(True)
+        self.log_replay.setMaximumHeight(100)
+        self.log_replay.setFont(QFont("Consolas", 8))
+        lay_r.addWidget(self.log_replay)
+        self.lbl_wynik_replay = QLabel("")
+        self.lbl_wynik_replay.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        lay_r.addWidget(self.lbl_wynik_replay)
+        layout.addWidget(grp_replay)
+
+        # --- Demo bez nonce ---
+        grp_demo = QGroupBox("Demo: Replay BEZ nonce — 3/3 przechodzi (dlaczego nonce jest konieczny)")
+        grp_demo.setStyleSheet(
+            "QGroupBox { font-weight: bold; color: #c0392b; "
+            "border: 1px solid #e74c3c; }"
+        )
+        lay_d = QVBoxLayout(grp_demo)
+        self.btn_bez_nonce = QPushButton("Uruchom demo — pokazuje atak ktory by przeszedl bez nonce")
+        lay_d.addWidget(self.btn_bez_nonce)
+        self.log_bez_nonce = QTextEdit()
+        self.log_bez_nonce.setReadOnly(True)
+        self.log_bez_nonce.setMaximumHeight(90)
+        self.log_bez_nonce.setFont(QFont("Consolas", 8))
+        lay_d.addWidget(self.log_bez_nonce)
+        self.lbl_wynik_demo = QLabel("")
+        self.lbl_wynik_demo.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        lay_d.addWidget(self.lbl_wynik_demo)
+        layout.addWidget(grp_demo)
+
+        # --- MITM standalone ---
+        grp_mitm = QGroupBox("MITM — symulacja krok po kroku (standalone)")
+        lay_m = QVBoxLayout(grp_mitm)
+        ktrle_m = QHBoxLayout()
+        self.combo_bity_mitm = QComboBox()
+        self.combo_bity_mitm.addItems(["RSA-512 (szybki)", "RSA-1024"])
+        self.combo_tryb = QComboBox()
+        self.combo_tryb.addItems(["Tylko podsluch", "Podsluch + modyfikacja"])
+        self.btn_mitm = QPushButton("Uruchom MITM")
+        self.btn_mitm.setFixedWidth(130)
+        ktrle_m.addWidget(QLabel("RSA:")); ktrle_m.addWidget(self.combo_bity_mitm)
+        ktrle_m.addWidget(QLabel("Tryb:")); ktrle_m.addWidget(self.combo_tryb)
+        ktrle_m.addStretch(); ktrle_m.addWidget(self.btn_mitm)
+        lay_m.addLayout(ktrle_m)
+        self.log_mitm = QTextEdit()
+        self.log_mitm.setReadOnly(True)
+        self.log_mitm.setMaximumHeight(150)
+        self.log_mitm.setFont(QFont("Consolas", 8))
+        lay_m.addWidget(self.log_mitm)
+        self.lbl_wynik_mitm = QLabel("")
+        self.lbl_wynik_mitm.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        lay_m.addWidget(self.lbl_wynik_mitm)
+        layout.addWidget(grp_mitm)
+
+    def _kolor(self, opis: str) -> str:
+        if any(s in opis for s in ("WYKRY", "SKUTECZNA", "POPRAWNY", "ochrona")):
+            return "#27ae60"
+        if any(s in opis for s in ("UDANY", "Eve", "REPLAY", "przeszl", "BRAK", "MITM")):
+            return "#c0392b"
+        return "#2c3e50"
+
+    def dodaj_krok(self, log: QTextEdit, nr: str, opis: str) -> None:
+        kolor = self._kolor(opis)
+        log.append(f'<span style="color:{kolor};">[{nr}] {opis}</span>')
+        log.moveCursor(QTextCursor.MoveOperation.End)
+
+
+# ---------------------------------------------------------------------------
 # PASEK GÓRNY (status + przyciski)
 # ---------------------------------------------------------------------------
 
@@ -472,6 +644,7 @@ class OknoKlienta(QMainWindow):
         self.resize(860, 650)
 
         self._moj_watek: WatekKlienta | None = None
+        self._zachowany_klient: KlientMessenger | None = None  # reuzywany przy reconnect
         self._polaczony = False
         self._bezpieczny = False
 
@@ -492,13 +665,15 @@ class OknoKlienta(QMainWindow):
 
         # Zakladki
         self.tabs = QTabWidget()
-        self.czat  = ZakladkaCzat(rola)
-        self.krypto = ZakladkaKryptografia(rola)
-        self.bench  = ZakladkaBenchmarki()
+        self.czat     = ZakladkaCzat(rola)
+        self.krypto   = ZakladkaKryptografia(rola)
+        self.sec_lab  = ZakladkaSecurityLab()
+        self.bench    = ZakladkaBenchmarki()
 
-        self.tabs.addTab(self.czat,   "Czat")
-        self.tabs.addTab(self.krypto, "Kryptografia / RSA Lab")
-        self.tabs.addTab(self.bench,  "Benchmarki")
+        self.tabs.addTab(self.czat,    "Czat")
+        self.tabs.addTab(self.krypto,  "Kryptografia / RSA Lab")
+        self.tabs.addTab(self.sec_lab, "Security Lab")
+        self.tabs.addTab(self.bench,   "Benchmarki")
         main_layout.addWidget(self.tabs)
 
         self._podpnij_sygnaly()
@@ -515,6 +690,10 @@ class OknoKlienta(QMainWindow):
         self.bench.btn_start.clicked.connect(self._uruchom_benchmarki)
         if self.pasek.btn_wymiana:
             self.pasek.btn_wymiana.clicked.connect(self._inicjuj_wymiane)
+        # Security Lab
+        self.sec_lab.btn_replay.clicked.connect(self._uruchom_replay)
+        self.sec_lab.btn_bez_nonce.clicked.connect(self._uruchom_demo_bez_nonce)
+        self.sec_lab.btn_mitm.clicked.connect(self._uruchom_mitm)
 
     # ------------------------------------------------------------------
     # POŁĄCZENIE
@@ -526,7 +705,21 @@ class OknoKlienta(QMainWindow):
         self.pasek.btn_polacz.setEnabled(False)
         self.pasek.btn_polacz.setText("Laczenie...")
 
-        self._moj_watek = WatekKlienta(self.rola, self.port)
+        # Odlacz sygnaly starego watku przed zastapnieniem.
+        # Bez tego stary WatekKlienta moze pozniej wyemitowac sygnal_rozlaczony
+        # i przypadkowo zresetowac UI juz po uruchomieniu nowego polaczenia.
+        if self._moj_watek is not None:
+            try:
+                self._moj_watek.sygnal_polaczony.disconnect()
+                self._moj_watek.sygnal_status.disconnect()
+                self._moj_watek.sygnal_blad.disconnect()
+                self._moj_watek.sygnal_wiadomosc.disconnect()
+                self._moj_watek.sygnal_bezpieczny.disconnect()
+                self._moj_watek.sygnal_rozlaczony.disconnect()
+            except (RuntimeError, TypeError):
+                pass  # sygnaly juz odlaczone lub obiekt zniszczony
+
+        self._moj_watek = WatekKlienta(self.rola, self.port, self._zachowany_klient)
         self._moj_watek.sygnal_polaczony.connect(self._na_polaczenie)
         self._moj_watek.sygnal_status.connect(self._na_status)
         self._moj_watek.sygnal_blad.connect(self._na_blad)
@@ -614,6 +807,11 @@ class OknoKlienta(QMainWindow):
 
     def _reset_stanu(self) -> None:
         """Przywraca UI do stanu 'rozlaczony' — umozliwia ponowne polaczenie."""
+        # Zachowaj KlientMessenger — klucze sesji przezyja reconnect i pozwola
+        # odszyfrować wiadomości zakolejkowane na serwerze podczas offline.
+        if self._moj_watek and self._moj_watek.klient:
+            self._zachowany_klient = self._moj_watek.klient
+
         self._polaczony = False
         self._bezpieczny = False
         self.pasek.ustaw_polaczony(False)
@@ -637,16 +835,71 @@ class OknoKlienta(QMainWindow):
             # LOKALNE ECHO — pokazane tylko u nadawcy, bez duplikatu
             self.czat.dodaj_wiadomosc("Ja", tresc, self._kolor_ja)
             self.czat.pole_wiad.clear()
-            # Wyciagnij szczegoly kryptograficzne z aktualnie wyslaneego pakietu
-            # Format pakietu: [4B session_id | 4B nonce | 16B IV | 32B HMAC | 4B len | N B ct]
-            try:
-                from secure_messenger.crypto.aes_cbc import szyfruj_aes_cbc
-                from secure_messenger.crypto.hmac_sha256 import oblicz_hmac_pakietu
-                iv, ct = szyfruj_aes_cbc(tresc.encode('utf-8'), k._klucz_aes)
-                tag = oblicz_hmac_pakietu(k._klucz_hmac, iv, ct)
+            # Wyciagnij PRAWDZIWE IV/HMAC/szyfrogram z pakietu ktory faktycznie wyslano
+            # Format: [4B session_id | 4B nonce | 16B IV | 32B HMAC | 4B len | N B ct]
+            p = k.ostatni_pakiet_krypto
+            if p and len(p) >= 60:
+                iv  = p[8:24]
+                tag = p[24:56]
+                ct_len = int.from_bytes(p[56:60], 'big')
+                ct  = p[60:60 + ct_len]
                 self.czat.pokaz_szczegoly(iv, ct, tag)
-            except Exception:
-                pass
+
+    # ------------------------------------------------------------------
+    # SECURITY LAB
+    # ------------------------------------------------------------------
+
+    def _uruchom_replay(self) -> None:
+        self.sec_lab.log_replay.clear()
+        self.sec_lab.btn_replay.setEnabled(False)
+        wiad = self.sec_lab.pole_wiad_replay.text() or "Przelej 1000 zl"
+
+        self._watek_replay = WatekAtaku("replay", {"wiadomosc": wiad, "ile_replay": 3})
+        self._watek_replay.sygnal_krok.connect(
+            lambda nr, op: self.sec_lab.dodaj_krok(self.sec_lab.log_replay, nr, op)
+        )
+        self._watek_replay.sygnal_gotowy.connect(lambda p: self._na_koniec_ataku(
+            self.sec_lab.lbl_wynik_replay, self.sec_lab.btn_replay, p, kolor_sukces="#27ae60"
+        ))
+        self._watek_replay.start()
+
+    def _uruchom_demo_bez_nonce(self) -> None:
+        self.sec_lab.log_bez_nonce.clear()
+        self.sec_lab.btn_bez_nonce.setEnabled(False)
+        wiad = "Przelej 500 zl na konto Ewy"
+
+        self._watek_demo = WatekAtaku("demo_bez_nonce", {"wiadomosc": wiad})
+        self._watek_demo.sygnal_krok.connect(
+            lambda nr, op: self.sec_lab.dodaj_krok(self.sec_lab.log_bez_nonce, nr, op)
+        )
+        self._watek_demo.sygnal_gotowy.connect(lambda p: self._na_koniec_ataku(
+            self.sec_lab.lbl_wynik_demo, self.sec_lab.btn_bez_nonce, p, kolor_sukces="#c0392b"
+        ))
+        self._watek_demo.start()
+
+    def _uruchom_mitm(self) -> None:
+        self.sec_lab.log_mitm.clear()
+        self.sec_lab.btn_mitm.setEnabled(False)
+        bity = 512 if self.sec_lab.combo_bity_mitm.currentIndex() == 0 else 1024
+        modyfikuj = self.sec_lab.combo_tryb.currentIndex() == 1
+
+        self._watek_mitm = WatekAtaku("mitm", {
+            "wiadomosci": ["Przelej 1000 zl na konto 123", "Haslo: SuperSecret"],
+            "modyfikacja": (lambda t: t.replace("1000", "9999")) if modyfikuj else None,
+            "bity": bity,
+        })
+        self._watek_mitm.sygnal_krok.connect(
+            lambda nr, op: self.sec_lab.dodaj_krok(self.sec_lab.log_mitm, nr, op)
+        )
+        self._watek_mitm.sygnal_gotowy.connect(lambda p: self._na_koniec_ataku(
+            self.sec_lab.lbl_wynik_mitm, self.sec_lab.btn_mitm, p, kolor_sukces="#c0392b"
+        ))
+        self._watek_mitm.start()
+
+    def _na_koniec_ataku(self, lbl: QLabel, btn: QPushButton, podsum: str, kolor_sukces: str) -> None:
+        lbl.setText(podsum)
+        lbl.setStyleSheet(f"color: {kolor_sukces}; font-weight: bold;")
+        btn.setEnabled(True)
 
     # ------------------------------------------------------------------
     # BENCHMARKI

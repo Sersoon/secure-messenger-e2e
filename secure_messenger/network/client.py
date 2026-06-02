@@ -27,7 +27,6 @@ from secure_messenger.crypto.rsa import (
     szyfruj_klucze_sesji, deszyfruj_klucze_sesji
 )
 from secure_messenger.crypto.aes_cbc import zbuduj_pakiet, rozpakuj_pakiet
-from secure_messenger.crypto.hmac_sha256 import oblicz_hmac
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,6 +87,9 @@ class KlientMessenger:
         self._nonce_wyslany:  int = 0  # licznik wysłanych wiadomości
         self._nonce_odebrany: int = 0  # ostatni odebrany nonce (ochrona replay)
         self._blokada_nonce = threading.Lock()
+        # Flaga "aktywna sesja" — oddzielona od posiadania kluczy,
+        # żeby klucze mogły przetrwać rozłączenie i odszyfrować kolejkowane pakiety.
+        self._sesja_aktywna: bool = False
 
         # Klucze RSA Boba (przechowywane przez Boba, klucz pub wysyłany Alice)
         self._klucze_rsa: Optional[KluczeRSA] = None
@@ -95,14 +97,17 @@ class KlientMessenger:
         # Klucz pub Boba (przechowywany przez Alice)
         self._pub_boba: Optional[tuple[int, int]] = None
 
+        # Ostatni wysłany pakiet krypto (do wyświetlenia IV/ciphertext/HMAC w GUI)
+        self.ostatni_pakiet_krypto: Optional[bytes] = None
+
     # ------------------------------------------------------------------
     # WŁAŚCIWOŚCI
     # ------------------------------------------------------------------
 
     @property
     def tryb_bezpieczny(self) -> bool:
-        """True gdy wymiana kluczy RSA zakończona i sesja AES+HMAC aktywna."""
-        return self._klucz_aes is not None and self._klucz_hmac is not None
+        """True gdy sesja AES+HMAC jest aktywna (wysyłanie + badge SECURE)."""
+        return self._sesja_aktywna and self._klucz_aes is not None
 
     @property
     def polaczony(self) -> bool:
@@ -144,17 +149,35 @@ class KlientMessenger:
                 name=f"Odbiorca-{self.nazwa}"
             )
             self._watek_odbioru.start()
+
+            # Jesli sa zachowane klucze sesji (reconnect po rozlaczeniu),
+            # przywroc tryb bezpieczny bez ponownej wymiany RSA.
+            if self._klucz_aes is not None and self._klucz_hmac is not None:
+                self._sesja_aktywna = True
+                self._on_status("SECURE MODE przywrocony — klucze sesji z poprzedniej sesji")
+
             return True
 
         except Exception as e:
             blad = f"Błąd połączenia: {e}"
             self._logger.error(blad)
             self._on_blad(blad)
+            self._dziala.clear()
+            if self._socket:
+                try:
+                    self._socket.close()
+                except OSError:
+                    pass
             self._socket = None
             return False
 
     def rozlacz(self) -> None:
-        """Rozłącza klienta i zatrzymuje wątek odbiorczy."""
+        """Rozłącza klienta i zatrzymuje wątek odbiorczy.
+
+        Celowo NIE kasuje kluczy AES/HMAC — pozwala to odszyfrować pakiety
+        zakolejkowane na serwerze i dostarczone po ponownym połączeniu.
+        """
+        self._sesja_aktywna = False
         self._dziala.clear()
         if self._socket:
             try:
@@ -162,8 +185,6 @@ class KlientMessenger:
             except OSError:
                 pass
             self._socket = None
-        self._klucz_aes  = None
-        self._klucz_hmac = None
         self._logger.info("Rozłączono")
         self._on_status("Rozłączono od serwera")
 
@@ -220,6 +241,7 @@ class KlientMessenger:
         self._klucz_aes  = k_aes
         self._klucz_hmac = k_hmac
         self._session_id = int.from_bytes(os.urandom(4), 'big')
+        self._sesja_aktywna = True
 
         self._on_status("SECURE MODE aktywny — Alice ma klucze sesji")
         self._logger.info("Klucze sesji wysłane i zapisane przez Alice")
@@ -256,6 +278,8 @@ class KlientMessenger:
                 session_id=self._session_id,
                 nonce=nonce
             )
+            # Zachowaj pakiet do wyświetlenia szczegółów w GUI (IV/HMAC/szyfrogram)
+            self.ostatni_pakiet_krypto = pakiet_krypto
 
             # Owij w nagłówek typu MSG:
             payload = TYP_MSG + pakiet_krypto
@@ -345,7 +369,9 @@ class KlientMessenger:
             )
             self._klucz_aes  = k_aes
             self._klucz_hmac = k_hmac
-            self._session_id = 0  # Bob nie zna session_id — akceptuje dowolne
+            self._session_id = 0    # Bob nie zna session_id — akceptuje dowolne
+            self._nonce_odebrany = 0  # reset nonce dla nowej sesji
+            self._sesja_aktywna  = True
 
             self._on_status("SECURE MODE aktywny — Bob odszyfrował klucze sesji")
             self._logger.info("Klucze sesji odszyfrowane przez Boba")
@@ -353,9 +379,13 @@ class KlientMessenger:
             self._on_blad(f"Błąd odszyfrowania kluczy sesji: {e}")
 
     def _odbierz_wiadomosc(self, pakiet: bytes) -> None:
-        """Odszyfrowuje i weryfikuje odebraną wiadomość AES+HMAC."""
-        if not self.tryb_bezpieczny:
-            self._on_blad("Odebrano wiadomość bez aktywnej sesji — ignoruję")
+        """Odszyfrowuje i weryfikuje odebraną wiadomość AES+HMAC.
+
+        Działa też gdy sesja nie jest aktywna (tryb_bezpieczny=False) ale klucze
+        istnieją — pozwala odszyfrować pakiety zakolejkowane z poprzedniej sesji.
+        """
+        if not (self._klucz_aes and self._klucz_hmac):
+            self._on_blad("Odebrano wiadomość bez kluczy sesji — ignoruję")
             return
         try:
             session_id, nonce, plaintext = rozpakuj_pakiet(

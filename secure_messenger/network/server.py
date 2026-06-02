@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 DOMYSLNY_HOST: str = '127.0.0.1'
 DOMYSLNY_PORT: int = 9999
 NAGLOWEK_DLUGOSCI: int = 4
+_MAX_KOLEJKA: int = 50          # max pakietów na klienta w kolejce offline
 
 
 class SerwerRoutera:
@@ -57,6 +58,7 @@ class SerwerRoutera:
         on_log: Optional[Callable[[str], None]] = None,
         on_klienci: Optional[Callable[[list], None]] = None,
         on_pakiet_przechwycony: Optional[Callable[[], None]] = None,
+        on_kolejka: Optional[Callable[[str, int], None]] = None,
     ):
         self.host = host
         self.port = port
@@ -70,6 +72,10 @@ class SerwerRoutera:
         self._klienci: dict[str, socket.socket] = {}
         self._blokada = threading.Lock()
         self._dziala = threading.Event()
+
+        # Kolejkowanie wiadomości gdy odbiorca offline
+        self._on_kolejka = on_kolejka or (lambda n, i: None)
+        self._kolejka: dict[str, list[bytes]] = {}
 
         # Stan Eve (MITM + Replay)
         self._mitm_wlaczony: bool = False
@@ -218,6 +224,7 @@ class SerwerRoutera:
 
             self._log(f"{nazwa.capitalize()} polaczony ({adres[0]}:{adres[1]})")
             self._powiadom_klientow()
+            self._dostarcz_kolejke(nazwa)
 
             while self._dziala.is_set():
                 naglowek = self._odbierz_dokladnie(conn, NAGLOWEK_DLUGOSCI)
@@ -264,11 +271,16 @@ class SerwerRoutera:
             if nazwa not in ('alice', 'bob'):
                 conn.sendall(b'BLAD:Nazwa musi byc alice lub bob\n')
                 return None
+            zajeta = False
             with self._blokada:
                 if nazwa in self._klienci:
-                    conn.sendall(b'BLAD:Nazwa zajeta\n')
-                    return None
-                self._klienci[nazwa] = conn
+                    zajeta = True
+                else:
+                    self._klienci[nazwa] = conn
+            # sendall poza lockiem — nie blokuje pozostalych watkow serwera
+            if zajeta:
+                conn.sendall(b'BLAD:Nazwa zajeta\n')
+                return None
             conn.sendall(b'OK\n')
             return nazwa
         except Exception as e:
@@ -311,15 +323,54 @@ class SerwerRoutera:
         self._wyslij_do(cel, dane)
 
     def _wyslij_do(self, cel: str, dane: bytes) -> None:
+        log_msg = None
+        rozm = None
+        conn_cel = None
+
         with self._blokada:
             conn_cel = self._klienci.get(cel)
+            if conn_cel is None:
+                kolejka = self._kolejka.setdefault(cel, [])
+                if len(kolejka) < _MAX_KOLEJKA:
+                    kolejka.append(dane)
+                    rozm = len(kolejka)
+                    log_msg = (
+                        f"Cel '{cel}' offline — pakiet zakolejkowany "
+                        f"({rozm}/{_MAX_KOLEJKA})"
+                    )
+                else:
+                    log_msg = (
+                        f"Kolejka '{cel}' pelna ({_MAX_KOLEJKA}) — pakiet odrzucony"
+                    )
+
+        if log_msg:
+            self._log(log_msg)
+        if rozm is not None:
+            self._on_kolejka(cel, rozm)
         if conn_cel is None:
-            self._log(f"Cel '{cel}' niedostepny — pakiet odrzucony")
             return
+
         try:
             conn_cel.sendall(dane)
         except OSError as e:
             self._log(f"Blad wysylania do '{cel}': {e}")
+
+    def _dostarcz_kolejke(self, nazwa: str) -> None:
+        """Dostarcza zakolejkowane pakiety po ponownym połączeniu klienta."""
+        with self._blokada:
+            pakiety = self._kolejka.pop(nazwa, [])
+
+        if not pakiety:
+            return
+
+        self._log(
+            f"{nazwa.capitalize()}: dostarczam {len(pakiety)} zakolejkowanych "
+            f"pakiet(ow) z okresu rozlaczenia..."
+        )
+        for pakiet in pakiety:
+            self._wyslij_do(nazwa, pakiet)
+        self._log(f"{nazwa.capitalize()}: kolejka wyczyszczona")
+        self._on_kolejka(nazwa, 0)
 
     def _opakuj(self, dane: bytes) -> bytes:
         return len(dane).to_bytes(NAGLOWEK_DLUGOSCI, 'big') + dane

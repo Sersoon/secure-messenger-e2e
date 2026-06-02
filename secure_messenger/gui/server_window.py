@@ -28,9 +28,10 @@ from secure_messenger.network.server import SerwerRoutera
 # ---------------------------------------------------------------------------
 
 class _Sygnaly(QObject):
-    sygnal_log               = pyqtSignal(str)
-    sygnal_klienci           = pyqtSignal(list)
+    sygnal_log                 = pyqtSignal(str)
+    sygnal_klienci             = pyqtSignal(list)
     sygnal_pakiet_przechwycony = pyqtSignal()
+    sygnal_kolejka             = pyqtSignal(str, int)   # (nazwa_klienta, rozmiar)
 
 
 # ---------------------------------------------------------------------------
@@ -53,12 +54,19 @@ class OknoSerwera(QMainWindow):
         self._sygnaly.sygnal_log.connect(self._na_log)
         self._sygnaly.sygnal_klienci.connect(self._na_klienci)
         self._sygnaly.sygnal_pakiet_przechwycony.connect(self._na_pakiet_przechwycony)
+        self._sygnaly.sygnal_kolejka.connect(self._na_kolejka)
+
+        # Stan odznaki klientów (połączenie + kolejka)
+        self._polaczeni: list = []
+        self._kolejka_alice: int = 0
+        self._kolejka_bob:   int = 0
 
         self._serwer = SerwerRoutera(
             port=port,
             on_log=lambda m: self._sygnaly.sygnal_log.emit(m),
             on_klienci=lambda k: self._sygnaly.sygnal_klienci.emit(k),
             on_pakiet_przechwycony=lambda: self._sygnaly.sygnal_pakiet_przechwycony.emit(),
+            on_kolejka=lambda n, i: self._sygnaly.sygnal_kolejka.emit(n, i),
         )
 
         self._buduj_ui()
@@ -198,10 +206,34 @@ class OknoSerwera(QMainWindow):
         self.log.moveCursor(QTextCursor.MoveOperation.End)
 
     def _na_klienci(self, lista: list) -> None:
-        kol_alice = "#27ae60" if "alice" in lista else "#7f8c8d"
-        kol_bob   = "#27ae60" if "bob"   in lista else "#7f8c8d"
-        self.lbl_alice.setStyleSheet(f"color: {kol_alice}; padding: 4px 10px; font-weight: bold;")
-        self.lbl_bob.setStyleSheet(  f"color: {kol_bob};   padding: 4px 10px; font-weight: bold;")
+        self._polaczeni = lista
+        self._odswiezBadge('alice')
+        self._odswiezBadge('bob')
+
+    def _na_kolejka(self, nazwa: str, rozmiar: int) -> None:
+        if nazwa == 'alice':
+            self._kolejka_alice = rozmiar
+        else:
+            self._kolejka_bob = rozmiar
+        self._odswiezBadge(nazwa)
+
+    def _odswiezBadge(self, nazwa: str) -> None:
+        lbl = self.lbl_alice if nazwa == 'alice' else self.lbl_bob
+        polaczony = nazwa in self._polaczeni
+        kolejka   = self._kolejka_alice if nazwa == 'alice' else self._kolejka_bob
+
+        if polaczony:
+            tekst = f"● {nazwa.capitalize()}"
+            kolor = "#27ae60"
+        elif kolejka > 0:
+            tekst = f"● {nazwa.capitalize()} ({kolejka} oczekuje)"
+            kolor = "#e67e22"
+        else:
+            tekst = f"● {nazwa.capitalize()}"
+            kolor = "#7f8c8d"
+
+        lbl.setText(tekst)
+        lbl.setStyleSheet(f"color: {kolor}; padding: 4px 10px; font-weight: bold;")
 
     def _na_pakiet_przechwycony(self) -> None:
         self.btn_replay.setEnabled(True)
@@ -219,9 +251,12 @@ class OknoSerwera(QMainWindow):
         ).start()
 
     def _ustaw_mitm_w_tle(self, wlaczony: bool) -> None:
-        self._serwer.ustaw_mitm(wlaczony)
-        self._sygnaly.sygnal_log.emit("")  # dummy emit zeby odswiezyl UI
-        self.chk_mitm.setEnabled(True)
+        try:
+            self._serwer.ustaw_mitm(wlaczony)
+        except Exception as e:
+            self._sygnaly.sygnal_log.emit(f"[BLAD] ustaw_mitm: {e}")
+        finally:
+            self.chk_mitm.setEnabled(True)
 
     def _na_replay(self, wlaczony: bool) -> None:
         self._serwer.ustaw_replay(wlaczony)

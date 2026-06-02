@@ -397,7 +397,11 @@ def deszyfruj_klucze_sesji(
 
     Zwraca:
         (klucz_aes, klucz_hmac) — odszyfrowane klucze sesji (po 32 bajty)
+
+    Uwaga: rjust(32) przywraca wiodące zera usuniete przez lstrip w deszyfruj_rsa.
+    Textbook RSA nie koduje dlugosci — bity wiodace klucza AES/HMAC sa tracone
+    przy konwersji int->bytes i musza byc tu przywrocone.
     """
-    klucz_aes = deszyfruj_rsa(zaszyfrowany_aes, klucz_pryw)
-    klucz_hmac = deszyfruj_rsa(zaszyfrowany_hmac, klucz_pryw)
+    klucz_aes  = deszyfruj_rsa(zaszyfrowany_aes,  klucz_pryw).rjust(32, b'\x00')
+    klucz_hmac = deszyfruj_rsa(zaszyfrowany_hmac, klucz_pryw).rjust(32, b'\x00')
     return klucz_aes, klucz_hmac

@@ -535,6 +535,7 @@ class ZakladkaSteganografia(QWidget):
         self._sciezka_stego: str | None = None
         self._odebrany_ppm: bytes | None = None   # ostatnio odebrany obraz przez siec
         self._odebrany_od:  str   | None = None   # nadawca odebranego obrazu
+        self._klucz_aes:  bytes | None = None     # klucz sesji AES (z RSA key exchange)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -810,14 +811,34 @@ class ZakladkaSteganografia(QWidget):
         """Włącza/wyłącza przycisk wysyłania w zależności od stanu połączenia."""
         if polaczony:
             self.lbl_polaczenie_steg.setText(
-                "Polaczono z serwerem — mozesz wyslac obraz steganograficzny"
+                "Polaczono z serwerem — oczekiwanie na sesje AES..."
             )
-            self.lbl_polaczenie_steg.setStyleSheet("color: #4ade80; font-size: 9px;")
+            self.lbl_polaczenie_steg.setStyleSheet("color: #fbbf24; font-size: 9px;")
             self.btn_ukryj_i_wyslij.setEnabled(True)
         else:
             self.lbl_polaczenie_steg.setText("Brak polaczenia z serwerem")
             self.lbl_polaczenie_steg.setStyleSheet("color: #9ca3af; font-size: 9px;")
             self.btn_ukryj_i_wyslij.setEnabled(False)
+
+    def ustaw_klucze_sesji(self, klucz_aes: bytes | None, klucz_hmac: bytes | None) -> None:
+        """Przekazuje klucze sesji AES z RSA key exchange — aktywuje tryb AES+LSB."""
+        self._klucz_aes  = klucz_aes
+        self._klucz_hmac = klucz_hmac
+        if not self.btn_ukryj_i_wyslij.isEnabled():
+            return  # nie polaczony — nie zmieniaj etykiety
+        if klucz_aes:
+            self.lbl_polaczenie_steg.setText(
+                "SECURE — wiadomosc bedzie szyfrowana AES-256, "
+                "dopiero potem ukryta w LSB obrazu"
+            )
+            self.lbl_polaczenie_steg.setStyleSheet(
+                "color: #4ade80; font-size: 9px; font-weight: bold;"
+            )
+        else:
+            self.lbl_polaczenie_steg.setText(
+                "Polaczono — brak sesji AES, wiadomosc trafi do LSB jako plaintext"
+            )
+            self.lbl_polaczenie_steg.setStyleSheet("color: #fbbf24; font-size: 9px;")
 
     def na_odebrany_steg(self, nadawca: str, ppm_dane: bytes) -> None:
         """Wywoływana przez OknoKlienta gdy przyszedł pakiet STEG_IMAGE."""
@@ -848,12 +869,25 @@ class ZakladkaSteganografia(QWidget):
             sc_oryg  = os.path.join(tmpdir, "oryg.ppm")
             sc_stego = os.path.join(tmpdir, "stego.ppm")
             stworz_ppm(sc_oryg, 128, 128)
-            ukryj_wiadomosc(sc_oryg, sc_stego, wiad.encode('utf-8'))
+
+            wiad_bytes = wiad.encode('utf-8')
+            if self._klucz_aes:
+                # Kryptografia + steganografia: AES → LSB
+                # Atakujacy wyciagnie z LSB jedynie szyfrogram, nie plaintext
+                from secure_messenger.crypto.aes_cbc import szyfruj_aes_cbc
+                iv, szyfrogram = szyfruj_aes_cbc(wiad_bytes, self._klucz_aes)
+                payload = iv + szyfrogram  # [16 B IV | N B szyfrogram]
+                tryb = "AES-256+LSB"
+            else:
+                payload = wiad_bytes
+                tryb = "LSB plaintext (brak sesji AES)"
+
+            ukryj_wiadomosc(sc_oryg, sc_stego, payload)
             with open(sc_stego, 'rb') as f:
                 ppm_dane = f.read()
             self.lbl_wynik_wysylki.setText(
-                f"[STEG] Obraz wysylany ({len(ppm_dane)} B, "
-                f"ukrytych {len(wiad.encode())} B)..."
+                f"[STEG/{tryb}] Obraz wysylany ({len(ppm_dane)} B, "
+                f"payload {len(payload)} B)"
             )
             self.lbl_wynik_wysylki.setStyleSheet("color: #4ade80; font-weight: bold;")
             self.sygnal_wyslij_steg.emit(ppm_dane)
@@ -873,11 +907,27 @@ class ZakladkaSteganografia(QWidget):
             with open(sc, 'wb') as f:
                 f.write(self._odebrany_ppm)
             dane = odczytaj_wiadomosc(sc)
-            tekst = dane.decode('utf-8', errors='replace')
+
+            tryb = "LSB plaintext"
+            tekst = None
+            if self._klucz_aes and len(dane) >= 32:
+                # Sprobuj odszyfrowanie AES: [16 B IV | N B szyfrogram]
+                try:
+                    from secure_messenger.crypto.aes_cbc import deszyfruj_aes_cbc
+                    iv = dane[:16]
+                    szyfrogram = dane[16:]
+                    tekst = deszyfruj_aes_cbc(szyfrogram, self._klucz_aes, iv).decode('utf-8')
+                    tryb = "AES-256+LSB"
+                except Exception:
+                    tekst = None  # odszyfrowanie nieudane — probuj jako plaintext
+
+            if tekst is None:
+                tekst = dane.decode('utf-8', errors='replace')
+
             self.pole_odczyt_odebrany.setText(tekst)
             nadawca = (self._odebrany_od or '?').capitalize()
             self.lbl_odebrany_status.setText(
-                f"[STEG] Odczytano ukryta wiadomosc od {nadawca}: \"{tekst[:60]}\""
+                f"[STEG/{tryb}] Odczytano od {nadawca}: \"{tekst[:60]}\""
             )
             self.lbl_odebrany_status.setStyleSheet("color: #4ade80; font-weight: bold;")
         except Exception as e:
@@ -1222,6 +1272,8 @@ class OknoKlienta(QMainWindow):
                 n, e = k._pub_boba
                 self.krypto.ustaw(self.krypto.txt_n, hex(n))
                 self.krypto.ustaw(self.krypto.txt_e, str(e))
+            # Przekaz klucze sesji do zakladki steg — aktywuje tryb AES+LSB
+            self.stego.ustaw_klucze_sesji(k._klucz_aes, k._klucz_hmac)
 
     def _na_wiadomosc(self, nadawca: str, tresc: str) -> None:
         """Odebrana wiadomosc od DRUGIEJ strony — wyswietl u odbiorcy."""
@@ -1251,6 +1303,7 @@ class OknoKlienta(QMainWindow):
         self.pasek.ustaw_polaczony(False)
         self.pasek.ustaw_bezpieczny(False)
         self.stego.ustaw_polaczony(False)
+        self.stego.ustaw_klucze_sesji(None, None)
         if self.pasek.btn_wymiana:
             self.pasek.btn_wymiana.setEnabled(False)
         self.czat.ustaw_aktywny(False)

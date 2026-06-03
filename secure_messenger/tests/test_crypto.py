@@ -620,3 +620,69 @@ class TestIntegracjaKryptograficzna:
         # Teraz replay (nonce=1 ponownie) — detekcja po stronie odbiorcy
         _, nc_replay, _ = rozpakuj_pakiet(pakiet, k_aes, k_hmac)
         assert nc_replay <= ostatni_nonce  # detekcja: nonce zbyt niskie
+
+
+# ===========================================================================
+# TESTY: Steganografia LSB
+# ===========================================================================
+
+import os as _os_steg
+import tempfile as _tempfile
+
+
+class TestSteganografiaLSB:
+    """Testy ręcznej implementacji LSB — ukrywanie danych w obrazach PPM."""
+
+    @pytest.fixture(scope="class")
+    def obraz_ppm(self, tmp_path_factory):
+        """Tworzy tymczasowy obraz PPM 64×64 do testów."""
+        from secure_messenger.steganography.lsb import stworz_ppm
+        sciezka = str(tmp_path_factory.mktemp("steg") / "test.ppm")
+        stworz_ppm(sciezka, 64, 64)
+        return sciezka
+
+    def test_roundtrip_krotka_wiadomosc(self, obraz_ppm, tmp_path):
+        from secure_messenger.steganography.lsb import ukryj_wiadomosc, odczytaj_wiadomosc
+        wiad = b"Tajna wiadomosc"
+        wyj = str(tmp_path / "stego.ppm")
+        ukryj_wiadomosc(obraz_ppm, wyj, wiad)
+        assert odczytaj_wiadomosc(wyj) == wiad
+
+    def test_roundtrip_bajty_losowe(self, obraz_ppm, tmp_path):
+        from secure_messenger.steganography.lsb import ukryj_wiadomosc, odczytaj_wiadomosc
+        wiad = _os_steg.urandom(50)
+        wyj = str(tmp_path / "stego_rand.ppm")
+        ukryj_wiadomosc(obraz_ppm, wyj, wiad)
+        assert odczytaj_wiadomosc(wyj) == wiad
+
+    def test_tylko_lsb_zmieniony(self, obraz_ppm, tmp_path):
+        """Każdy zmieniony bajt różni się co najwyżej o 1 (tylko LSB)."""
+        from secure_messenger.steganography.lsb import ukryj_wiadomosc, _wczytaj_ppm
+        wyj = str(tmp_path / "stego_lsb.ppm")
+        ukryj_wiadomosc(obraz_ppm, wyj, b"Test LSB")
+        _, _, p_oryg = _wczytaj_ppm(obraz_ppm)
+        _, _, p_steg = _wczytaj_ppm(wyj)
+        for a, b in zip(p_oryg, p_steg):
+            assert (a & 0xFE) == (b & 0xFE), "Zmiana powyżej LSB!"
+
+    def test_pojemnosc_64x64(self, obraz_ppm):
+        from secure_messenger.steganography.lsb import oblicz_pojemnosc
+        info = oblicz_pojemnosc(obraz_ppm)
+        assert info['szerokosc'] == 64
+        assert info['wysokosc'] == 64
+        # 64*64*3 bitów / 8 - 4 = 1532 B
+        assert info['pojemnosc_bajtow'] == 64 * 64 * 3 // 8 - 4
+
+    def test_za_dluga_wiadomosc(self, obraz_ppm, tmp_path):
+        from secure_messenger.steganography.lsb import ukryj_wiadomosc, oblicz_pojemnosc
+        info = oblicz_pojemnosc(obraz_ppm)
+        za_dluga = _os_steg.urandom(info['pojemnosc_bajtow'] + 1)
+        wyj = str(tmp_path / "stego_overflow.ppm")
+        with pytest.raises(ValueError, match="za długa"):
+            ukryj_wiadomosc(obraz_ppm, wyj, za_dluga)
+
+    def test_pusta_wiadomosc(self, obraz_ppm, tmp_path):
+        from secure_messenger.steganography.lsb import ukryj_wiadomosc, odczytaj_wiadomosc
+        wyj = str(tmp_path / "stego_pusty.ppm")
+        ukryj_wiadomosc(obraz_ppm, wyj, b"")
+        assert odczytaj_wiadomosc(wyj) == b""

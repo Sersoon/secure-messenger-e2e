@@ -248,7 +248,9 @@ class KlientMessenger:
         self._session_id = int.from_bytes(os.urandom(4), 'big')
         self._sesja_aktywna = True
 
-        self._on_status("SECURE MODE aktywny — Alice ma klucze sesji")
+        self._on_status("RSA Key Exchange zakonczony")
+        self._on_status("AES-256: aktywny | HMAC-SHA256: aktywny")
+        self._on_status("SECURE MODE wlaczony")
         self._logger.info("Klucze sesji wysłane i zapisane przez Alice")
 
     # ------------------------------------------------------------------
@@ -417,7 +419,9 @@ class KlientMessenger:
             self._nonce_odebrany = 0  # reset nonce dla nowej sesji
             self._sesja_aktywna  = True
 
-            self._on_status("SECURE MODE aktywny — Bob odszyfrował klucze sesji")
+            self._on_status("RSA Key Exchange zakonczony")
+            self._on_status("AES-256: aktywny | HMAC-SHA256: aktywny")
+            self._on_status("SECURE MODE wlaczony")
             self._logger.info("Klucze sesji odszyfrowane przez Boba")
         except Exception as e:
             self._on_blad(f"Błąd odszyfrowania kluczy sesji: {e}")
@@ -439,10 +443,12 @@ class KlientMessenger:
             # Sprawdzenie replay attack
             with self._blokada_nonce:
                 if nonce <= self._nonce_odebrany and self._nonce_odebrany > 0:
+                    self._on_blad(f"REPLAY ATTACK wykryty!")
                     self._on_blad(
-                        f"WYKRYTO REPLAY ATTACK! nonce={nonce} <= "
-                        f"ostatni={self._nonce_odebrany}"
+                        f"Powod: nonce={nonce} zostal juz wykorzystany "
+                        f"(ostatni={self._nonce_odebrany})"
                     )
+                    self._on_blad("Pakiet odrzucony")
                     return
                 self._nonce_odebrany = nonce
 
@@ -461,7 +467,6 @@ class KlientMessenger:
             nadawca = payload[:idx].decode('utf-8', errors='replace').strip()
             ppm_dane = payload[idx + 1:]
             self.ostatni_odebrany_steg = ppm_dane
-            cel = 'bob' if self.nazwa == 'alice' else 'alice'
             self._logger.info(
                 f"[STEG] Odebrano obraz od '{nadawca}' ({len(ppm_dane)} B)"
             )

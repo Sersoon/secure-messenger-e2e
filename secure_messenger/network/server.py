@@ -433,7 +433,9 @@ class SerwerRoutera:
         try:
             from secure_messenger.crypto.aes_cbc import rozpakuj_pakiet
             _, _, plaintext = rozpakuj_pakiet(pakiet, self._eve_klucz_aes, self._eve_klucz_hmac)
-            self._log(f"EVE czyta [{od.upper()}]: \"{plaintext.decode('utf-8', errors='replace')}\"")
+            decoded = plaintext.decode('utf-8', errors='replace')
+            self._log(f"MITM: naruszono poufnosc komunikacji [{od.upper()}]")
+            self._log(f"Odczytana wiadomosc: \"{decoded}\"")
         except Exception:
             pass  # moze sie nie udac przy pierwszym pakiecie (rozne session_id)
 

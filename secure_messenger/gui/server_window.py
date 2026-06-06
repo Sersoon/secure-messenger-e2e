@@ -48,7 +48,7 @@ class OknoSerwera(QMainWindow):
         super().__init__()
         self.port = port
         self.setWindowTitle("Secure Messenger — Serwer / Eve")
-        self.setFixedSize(440, 580)
+        self.setMinimumSize(360, 500)
 
         self._sygnaly = _Sygnaly()
         self._sygnaly.sygnal_log.connect(self._na_log)

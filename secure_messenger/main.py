@@ -28,17 +28,29 @@ from PyQt6.QtCore import QRect
 
 
 def _rozmies_okna(okna: list, ekran: QScreen) -> None:
-    """Ustawia okna obok siebie na srodku ekranu."""
+    """Wypelnia caly dostepny obszar ekranu — 3 okna bez przerw, pelna wysokosc."""
+    from PyQt6.QtWidgets import QApplication
+    # Poczekaj az Qt obliczy wysokosc ramki (pasek tytulu + obramowanie Windows)
+    QApplication.processEvents()
+
     geo: QRect = ekran.availableGeometry()
-    laczona_szerokosc = sum(o.width() for o in okna) + 20 * (len(okna) - 1)
 
-    start_x = max(0, (geo.width() - laczona_szerokosc) // 2)
-    y = max(50, (geo.height() - max(o.height() for o in okna)) // 2)
+    # resize() ustawia obszar tresci, nie zewnetrzna ramke — odejmij narzut ramki
+    # zeby dolny pasek nie wychodzil pod pasek zadan Windows
+    narzut_h = max(0, okna[0].frameGeometry().height() - okna[0].height())
+    wysokosc = geo.height() - narzut_h
 
-    x = start_x
+    szerokosc_serwera = geo.width() * 22 // 100
+    szerokosc_klienta = (geo.width() - szerokosc_serwera) // (len(okna) - 1)
+
+    okna[0].resize(szerokosc_serwera, wysokosc)
+    for okno in okna[1:]:
+        okno.resize(szerokosc_klienta, wysokosc)
+
+    x = geo.x()
     for okno in okna:
-        okno.move(geo.x() + x, geo.y() + y)
-        x += okno.width() + 20
+        okno.move(x, geo.y())
+        x += okno.width()
 
 
 def main() -> None:

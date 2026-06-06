@@ -1114,8 +1114,8 @@ class OknoKlienta(QMainWindow):
         self.rola = rola
         self.port = port
         self.setWindowTitle(f"Secure Messenger E2E — {rola.capitalize()}")
-        self.setMinimumSize(780, 600)
-        self.resize(860, 650)
+        self.setMinimumSize(560, 560)
+        self.resize(720, 640)
 
         self._moj_watek: WatekKlienta | None = None
         self._zachowany_klient: KlientMessenger | None = None  # reuzywany przy reconnect

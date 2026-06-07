@@ -44,6 +44,10 @@ DOMYSLNY_PORT: int = 9999
 NAGLOWEK_DLUGOSCI: int = 4
 _MAX_KOLEJKA: int = 50          # max pakietów na klienta w kolejce offline
 
+# Typy pakietów PKI (serwer ↔ klient)
+TYP_SERVER_PUB = b'SERVER_PUB:'  # Server → Klient: klucz publiczny CA serwera
+TYP_RSA_CERT   = b'RSA_CERT:'    # Server → Alice: certyfikowany klucz pub Boba
+
 
 class SerwerRoutera:
     """
@@ -76,6 +80,10 @@ class SerwerRoutera:
         # Kolejkowanie wiadomości gdy odbiorca offline
         self._on_kolejka = on_kolejka or (lambda n, i: None)
         self._kolejka: dict[str, list[bytes]] = {}
+
+        # PKI — serwer jako CA (Certification Authority)
+        self._pki_wlaczony: bool = False
+        self._pki_klucze = None          # KluczeRSA serwera (CA key pair)
 
         # Stan Eve (MITM + Replay)
         self._mitm_wlaczony: bool = False
@@ -129,6 +137,36 @@ class SerwerRoutera:
         else:
             self._przechwycony_pakiet = None
             self._log("Tryb Replay wyłączony")
+
+    def ustaw_pki(self, wlaczony: bool) -> None:
+        """Włącza/wyłącza tryb PKI — serwer jako CA podpisujący klucze publiczne Boba."""
+        self._pki_wlaczony = wlaczony
+        if wlaczony:
+            from secure_messenger.crypto.rsa import generuj_klucze_rsa, fingerprint_klucza
+            self._log("PKI: generuję klucze RSA serwera (CA, RSA-512)...")
+            self._pki_klucze = generuj_klucze_rsa(512)
+            n, e = self._pki_klucze.klucz_publiczny
+            fp = fingerprint_klucza(n, e)
+            self._log(f"PKI: klucze CA gotowe. Fingerprint CA: {fp[:32]}...")
+            self._log("PKI: każdy klucz pub Boba będzie certyfikowany podpisem CA")
+            # Wyslij SERVER_PUB do klientow juz podlaczonych (polaczyli sie przed wlaczeniem PKI)
+            pki_payload = f"SERVER_PUB:{hex(n)}:{hex(e)}\n".encode()
+            with self._blokada:
+                klienci_teraz = dict(self._klienci)
+            for nazwa, conn in klienci_teraz.items():
+                try:
+                    conn.sendall(self._opakuj(pki_payload))
+                    self._log(f"PKI: wysłano klucz CA do już połączonego '{nazwa}'")
+                except OSError:
+                    pass
+        else:
+            self._pki_klucze = None
+            self._log("PKI wyłączone — klucze wymieniane bez certyfikatu")
+
+    @property
+    def klucz_pub_pki(self) -> Optional[tuple[int, int]]:
+        """Klucz publiczny CA serwera (None jeśli PKI wyłączone)."""
+        return self._pki_klucze.klucz_publiczny if self._pki_klucze else None
 
     def wyslij_replay(self) -> bool:
         """Wysyła przechwycony pakiet MSG ponownie → odbiorca wykrywa stary nonce."""
@@ -225,6 +263,17 @@ class SerwerRoutera:
 
             self._log(f"{nazwa.capitalize()} połączony ({adres[0]}:{adres[1]})")
             self._powiadom_klientow()
+
+            # PKI: wyślij klientowi klucz publiczny CA zaraz po rejestracji
+            if self._pki_wlaczony and self._pki_klucze:
+                n_ca, e_ca = self._pki_klucze.klucz_publiczny
+                pki_payload = f"SERVER_PUB:{hex(n_ca)}:{hex(e_ca)}\n".encode()
+                try:
+                    conn.sendall(self._opakuj(pki_payload))
+                    self._log(f"PKI: wysłano klucz CA do '{nazwa}'")
+                except OSError:
+                    pass
+
             self._dostarcz_kolejke(nazwa)
 
             while self._dziala.is_set():
@@ -293,13 +342,36 @@ class SerwerRoutera:
     # ------------------------------------------------------------------
 
     def _przekaz(self, od: str, dane: bytes) -> None:
-        """Przekazuje pakiet — opcjonalnie przez Eve (MITM/Replay)."""
+        """Przekazuje pakiet — opcjonalnie przez Eve (MITM/Replay).
+
+        Kolejność dla RSA_PUB (kluczowa dla scenariuszy MITM+PKI):
+            1. MITM podmienia klucz Boba kluczem Eve (jeśli aktywny)
+            2. PKI podpisuje klucz — Boba LUB Eve jeśli MITM był aktywny
+               → scenariusz "skompromitowanego CA": cert jest ważny, ale dla klucza Eve
+            3. Bez PKI: RSA_PUB forwarded as-is (z podmianą MITM lub bez)
+        """
         cel = 'bob' if od == 'alice' else 'alice'
         payload = dane[NAGLOWEK_DLUGOSCI:]
 
-        # MITM: przechwytuj klucz publiczny Boba
-        if self._mitm_wlaczony and od == 'bob' and payload.startswith(b'RSA_PUB:'):
-            self._mitm_przechwyc_klucz_pub(payload, cel)
+        # RSA_PUB od Boba — obsłuż MITM i PKI w odpowiedniej kolejności
+        if od == 'bob' and payload.startswith(b'RSA_PUB:'):
+            # Krok 1: MITM podmienia klucz Boba kluczem Eve (zanim PKI go podpisze)
+            if self._mitm_wlaczony:
+                nowy = self._mitm_podmien_klucz_pub(payload)
+                if nowy is None:
+                    return
+                payload = nowy
+                dane = self._opakuj(payload)
+
+            # Krok 2: PKI certyfikuje klucz (Boba lub Eve po podmianie przez MITM)
+            if self._pki_wlaczony and self._pki_klucze:
+                cert_payload = self._pki_certyfikuj_klucz(payload)
+                if cert_payload is not None:
+                    self._wyslij_do(cel, self._opakuj(cert_payload))
+                return
+
+            # Krok 3: brak PKI — prześlij RSA_PUB (podmieniony lub oryginalny)
+            self._wyslij_do(cel, dane)
             return
 
         # MITM: przechwytuj zaszyfrowane klucze sesji od Alice
@@ -380,8 +452,34 @@ class SerwerRoutera:
     # MITM — pomocnicze
     # ------------------------------------------------------------------
 
-    def _mitm_przechwyc_klucz_pub(self, payload: bytes, cel: str) -> None:
-        """Eve przechwytuje klucz pub Boba i wysyła Alice swój własny."""
+    def _pki_certyfikuj_klucz(self, payload: bytes) -> Optional[bytes]:
+        """CA podpisuje klucz publiczny i zwraca payload RSA_CERT.
+
+        Format RSA_CERT: b'RSA_CERT:<n_hex>:<e_hex>:<sig_hex>\\n'
+        Podpis obejmuje treść '<n_hex>:<e_hex>' — wiąże podpis z konkretnym kluczem.
+        Jeśli MITM aktywny: payload zawiera już klucz Eve — CA podpisuje klucz Eve!
+        To jest scenariusz skompromitowanego CA.
+        """
+        try:
+            from secure_messenger.crypto.rsa import podpisz_rsa
+            tekst = payload.decode().strip()
+            dane_klucza = tekst[len('RSA_PUB:'):]   # '<n_hex>:<e_hex>'
+            podpis = podpisz_rsa(dane_klucza.encode(), self._pki_klucze.klucz_prywatny)
+            cert = f"RSA_CERT:{dane_klucza}:{podpis.hex()}\n".encode()
+            if self._mitm_wlaczony:
+                self._log(
+                    "PKI+MITM: CA podpisało klucz Eve (skompromitowany CA)! "
+                    "Cert ważny, ale dla klucza Eve!"
+                )
+            else:
+                self._log(f"PKI: certyfikowano klucz Boba (sig={podpis.hex()[:12]}...)")
+            return cert
+        except Exception as exc:
+            self._log(f"PKI błąd certyfikacji: {exc}")
+            return None
+
+    def _mitm_podmien_klucz_pub(self, payload: bytes) -> Optional[bytes]:
+        """Eve podmienia klucz pub Boba swoim własnym — zwraca nowy payload RSA_PUB."""
         try:
             tekst = payload.decode().strip()
             czesc = tekst[len('RSA_PUB:'):]
@@ -390,14 +488,13 @@ class SerwerRoutera:
             from secure_messenger.crypto.rsa import normaliz_bity_rsa
             bity = normaliz_bity_rsa(self._bob_klucz_pub[0])
             self._log(f"EVE: PRZECHWYCONO klucz pub Boba RSA-{bity}!")
-
-            # Wyslij Alice KLUCZ EVE zamiast Boba
             n_eve, e_eve = self._eve_klucze_rsa.klucz_publiczny
             nowy = f"RSA_PUB:{hex(n_eve)}:{hex(e_eve)}\n".encode()
-            self._wyslij_do(cel, self._opakuj(nowy))
-            self._log("MITM: wysłano Alice własny klucz publiczny (zastąpiono klucz Boba)")
-        except Exception as e:
-            self._log(f"MITM blad klucza pub: {e}")
+            self._log("MITM: podmieniono klucz Boba kluczem Eve (przed certyfikacją CA)")
+            return nowy
+        except Exception as exc:
+            self._log(f"MITM błąd podmiany klucza: {exc}")
+            return None
 
     def _mitm_przechwyc_klucze_sesji(self, payload: bytes, cel: str) -> None:
         """Eve odczytuje klucze AES+HMAC, re-szyfruje kluczem Boba i przesyla."""
@@ -436,10 +533,10 @@ class SerwerRoutera:
             from secure_messenger.crypto.aes_cbc import rozpakuj_pakiet
             _, _, plaintext = rozpakuj_pakiet(pakiet, self._eve_klucz_aes, self._eve_klucz_hmac)
             decoded = plaintext.decode('utf-8', errors='replace')
-            self._log(f"MITM: odszyfrowano wiadomość od {od.upper()}")
-            self._log(f"Odczytana wiadomosc: \"{decoded}\"")
-        except Exception:
-            pass  # moze sie nie udac przy pierwszym pakiecie (rozne session_id)
+            self._log(f"EVE: odszyfrowano wiadomość od {od.upper()}")
+            self._log(f"     Tresc: \"{decoded}\"")
+        except Exception as exc:
+            self._log(f"EVE: nie udalo sie odszyfrować wiadomosci od {od.upper()} ({exc})")
 
     # ------------------------------------------------------------------
     # WŁAŚCIWOŚCI

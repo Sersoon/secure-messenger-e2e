@@ -1,5 +1,6 @@
 """RSA — ręczna implementacja edukacyjna. Nie używać produkcyjnie."""
 
+import hashlib
 import os
 import random
 
@@ -64,7 +65,7 @@ def miller_rabin(n: int, k: int = 20) -> bool:
 def generuj_liczbe_pierwsza(bity: int) -> int:
     """Losuje kandydatów i testuje Miller-Rabinem do skutku."""
     while True:
-        n = int.from_bytes(os.urandom(bity // 8 + 1), byteorder='big')
+        n = int.from_bytes(os.urandom(bity // 8), byteorder='big')
         n |= (1 << (bity - 1))
         n |= 1
         if miller_rabin(n):
@@ -127,6 +128,41 @@ def normaliz_bity_rsa(n: int) -> int:
         if bl <= standard * 3 // 2:
             return standard
     return bl
+
+
+def podpisz_rsa(wiadomosc: bytes, klucz_pryw: tuple[int, int]) -> bytes:
+    """Podpis cyfrowy RSA: s = SHA256(m)^d mod n.
+
+    Bezpieczne tylko gdy n > 2^256 (klucz ≥ 512 bitów), bo SHA-256 = 256 bitów.
+    """
+    n, d = klucz_pryw
+    skrot = hashlib.sha256(wiadomosc).digest()
+    m = int.from_bytes(skrot, 'big')
+    if m >= n:
+        raise ValueError("SHA-256 nie mieści się w module n — użyj klucza RSA ≥ 512 bitów")
+    s = mod_pow(m, d, n)
+    return s.to_bytes((n.bit_length() + 7) // 8, 'big')
+
+
+def weryfikuj_podpis_rsa(wiadomosc: bytes, podpis: bytes, klucz_pub: tuple[int, int]) -> bool:
+    """Weryfikuje podpis RSA. True jeśli podpis zgadza się z kluczem publicznym."""
+    n, e = klucz_pub
+    s = int.from_bytes(podpis, 'big')
+    if s >= n:
+        return False
+    m_odzyskany = mod_pow(s, e, n)
+    m_oczekiwany = int.from_bytes(hashlib.sha256(wiadomosc).digest(), 'big')
+    return m_odzyskany == m_oczekiwany
+
+
+def fingerprint_klucza(n: int, e: int) -> str:
+    """SHA-256 fingerprint klucza publicznego RSA — do weryfikacji MITM poza kanałem.
+
+    Jeśli fingerprint widziany przez Alice ≠ fingerprint widziany przez Boba,
+    aktywny atak MITM podmienił klucz publiczny podczas wymiany.
+    """
+    dane = n.to_bytes((n.bit_length() + 7) // 8, 'big') + e.to_bytes(8, 'big')
+    return hashlib.sha256(dane).hexdigest().upper()
 
 
 def szyfruj_rsa(wiadomosc: bytes, klucz_pub: tuple[int, int]) -> bytes:

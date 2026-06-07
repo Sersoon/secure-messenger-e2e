@@ -25,6 +25,7 @@ from typing import Callable, Optional
 from secure_messenger.crypto.rsa import (
     generuj_klucze_rsa, KluczeRSA,
     szyfruj_klucze_sesji, deszyfruj_klucze_sesji,
+    deszyfruj_rsa_crt,
     normaliz_bity_rsa,
 )
 from secure_messenger.crypto.aes_cbc import zbuduj_pakiet, rozpakuj_pakiet
@@ -38,10 +39,11 @@ logging.basicConfig(
 NAGLOWEK_DLUGOSCI: int = 4  # bajty nagłówka długości pakietu
 
 # Typy pakietów kontrolnych (tekstowych, poprzedzonych 4B długości)
-TYP_RSA_PUB  = b'RSA_PUB:'   # Bob → Alice: klucz publiczny RSA
-TYP_RSA_KEYS = b'RSA_KEYS:'  # Alice → Bob: zaszyfrowane klucze sesji
-TYP_MSG      = b'MSG:'       # wiadomość zaszyfrowana AES+HMAC
-TYP_STEG     = b'STEG_IMAGE:'  # obraz PPM ze steganogramem (kanał edukacyjny)
+TYP_RSA_PUB  = b'RSA_PUB:'     # Bob → Alice: klucz publiczny RSA (bez PKI)
+TYP_RSA_KEYS = b'RSA_KEYS:'   # Alice → Bob: zaszyfrowane klucze sesji
+TYP_MSG      = b'MSG:'         # wiadomość zaszyfrowana AES+HMAC
+TYP_SERVER_PUB = b'SERVER_PUB:'  # Server → Klient: klucz publiczny CA (PKI)
+TYP_RSA_CERT   = b'RSA_CERT:'    # Server → Alice: certyfikowany klucz pub Boba (PKI)
 
 
 class KlientMessenger:
@@ -65,7 +67,6 @@ class KlientMessenger:
         on_wiadomosc: Optional[Callable[[str, str], None]] = None,
         on_status: Optional[Callable[[str], None]] = None,
         on_blad: Optional[Callable[[str], None]] = None,
-        on_steg_image: Optional[Callable[[str, bytes], None]] = None,
     ):
         self.nazwa = nazwa.lower()
         self.host = host
@@ -75,7 +76,6 @@ class KlientMessenger:
         self._on_wiadomosc = on_wiadomosc or (lambda n, t: None)
         self._on_status    = on_status    or (lambda s: None)
         self._on_blad       = on_blad       or (lambda e: None)
-        self._on_steg_image = on_steg_image or (lambda n, d: None)
 
         self._logger = logging.getLogger(f"Klient-{self.nazwa}")
 
@@ -101,10 +101,13 @@ class KlientMessenger:
         # Klucz pub Boba (przechowywany przez Alice)
         self._pub_boba: Optional[tuple[int, int]] = None
 
+        # PKI — klucz publiczny CA serwera (otrzymany po rejestracji)
+        self._klucz_pub_ca: Optional[tuple[int, int]] = None
+        # True jeśli ostatni klucz pub Boba przeszedł weryfikację certyfikatu CA
+        self.certyfikat_zweryfikowany: bool = False
+
         # Ostatni wysłany pakiet krypto (do wyświetlenia IV/ciphertext/HMAC w GUI)
         self.ostatni_pakiet_krypto: Optional[bytes] = None
-        # Ostatni odebrany obraz steganograficzny (surowe bajty PPM)
-        self.ostatni_odebrany_steg: Optional[bytes] = None
 
     # ------------------------------------------------------------------
     # WŁAŚCIWOŚCI
@@ -301,40 +304,6 @@ class KlientMessenger:
             self._on_blad(blad)
             return False
 
-    def wyslij_steg_image(self, ppm_dane: bytes) -> bool:
-        """
-        Wysyła obraz PPM ze steganogramem do drugiej strony przez serwer.
-
-        Steganografia to oddzielny kanał edukacyjny — nie wymaga trybu bezpiecznego,
-        wystarczy aktywne połączenie TCP z serwerem.
-
-        Format pakietu: STEG_IMAGE:<nazwa_nadawcy>\\n<bajty_ppm>
-
-        Parametry:
-            ppm_dane — surowe bajty pliku PPM P6
-
-        Zwraca:
-            True — wysyłka udana, False — brak połączenia lub błąd
-        """
-        if not self.polaczony:
-            self._on_blad("[STEG] Brak połączenia — najpierw połącz się z serwerem")
-            return False
-        try:
-            cel = 'bob' if self.nazwa == 'alice' else 'alice'
-            naglowek_steg = f"{self.nazwa}\n".encode()
-            payload = TYP_STEG + naglowek_steg + ppm_dane
-            self._wyslij_surowy(payload)
-            self._logger.info(
-                f"[STEG] Obraz wysłany do '{cel}' ({len(ppm_dane)} B)"
-            )
-            self._on_status(f"[STEG] Obraz wysłany do {cel.capitalize()}")
-            return True
-        except Exception as e:
-            blad = f"[STEG] Błąd wysyłania obrazu: {e}"
-            self._logger.error(blad)
-            self._on_blad(blad)
-            return False
-
     # ------------------------------------------------------------------
     # WĄTEK ODBIORCZY
     # ------------------------------------------------------------------
@@ -364,7 +333,17 @@ class KlientMessenger:
         """
         Przetwarza odebrany pakiet w zależności od jego typu.
         """
-        # Pakiet kontrolny RSA — klucz publiczny (Bob → Alice)
+        # PKI: klucz publiczny CA serwera (dostarczany zaraz po rejestracji)
+        if dane.startswith(TYP_SERVER_PUB):
+            self._odbierz_klucz_pub_ca(dane[len(TYP_SERVER_PUB):])
+            return
+
+        # PKI: certyfikowany klucz pub Boba (Bob → Serwer → [podpis CA] → Alice)
+        if dane.startswith(TYP_RSA_CERT):
+            self._odbierz_cert_rsa(dane[len(TYP_RSA_CERT):])
+            return
+
+        # Pakiet kontrolny RSA — klucz publiczny (Bob → Alice, tryb bez PKI)
         if dane.startswith(TYP_RSA_PUB):
             self._odbierz_klucz_pub_rsa(dane[len(TYP_RSA_PUB):])
             return
@@ -379,11 +358,6 @@ class KlientMessenger:
             self._odbierz_wiadomosc(dane[len(TYP_MSG):])
             return
 
-        # Obraz PPM ze steganogramem
-        if dane.startswith(TYP_STEG):
-            self._odbierz_steg_image(dane[len(TYP_STEG):])
-            return
-
         self._logger.warning(f"Nieznany typ pakietu: {dane[:20]}")
 
     def _odbierz_klucz_pub_rsa(self, payload: bytes) -> None:
@@ -392,6 +366,11 @@ class KlientMessenger:
             tekst = payload.decode().strip()
             n_hex, e_hex = tekst.split(':')
             self._pub_boba = (int(n_hex, 16), int(e_hex, 16))
+            # Czysc stan PKI — to jest sciezka bez PKI (RSA_PUB zamiast RSA_CERT).
+            # Zapobiega false-positive "BLAD WERYFIKACJI" gdy _klucz_pub_ca pochodzi
+            # z poprzedniej sesji, w ktorej PKI bylo aktywne.
+            self._klucz_pub_ca = None
+            self.certyfikat_zweryfikowany = False
             bity = normaliz_bity_rsa(self._pub_boba[0])
             self._logger.info(f"Odebrano klucz publiczny RSA-{bity} od Boba")
             self._on_status(f"Alice odebrała klucz publiczny RSA-{bity} od Boba")
@@ -399,6 +378,65 @@ class KlientMessenger:
             self.wyslij_klucze_sesji_jako_alice()
         except Exception as e:
             self._on_blad(f"Błąd odbioru klucza RSA: {e}")
+
+    def _odbierz_klucz_pub_ca(self, payload: bytes) -> None:
+        """Odbiera i zapisuje klucz publiczny CA serwera (PKI bootstrap)."""
+        try:
+            tekst = payload.decode().strip()
+            n_hex, e_hex = tekst.split(':')
+            self._klucz_pub_ca = (int(n_hex, 16), int(e_hex, 16))
+            from secure_messenger.crypto.rsa import fingerprint_klucza, normaliz_bity_rsa
+            bity = normaliz_bity_rsa(self._klucz_pub_ca[0])
+            fp = fingerprint_klucza(*self._klucz_pub_ca)
+            self._logger.info(f"PKI: odebrany klucz CA serwera RSA-{bity}")
+            self._on_status(f"PKI: odebrany klucz CA serwera RSA-{bity} (fp={fp[:16]}...)")
+        except Exception as exc:
+            self._on_blad(f"PKI błąd odbioru klucza CA: {exc}")
+
+    def _odbierz_cert_rsa(self, payload: bytes) -> None:
+        """Alice: odbiera certyfikowany klucz pub Boba, weryfikuje podpis CA i kontynuuje."""
+        if self.nazwa != 'alice':
+            return
+        try:
+            from secure_messenger.crypto.rsa import weryfikuj_podpis_rsa, normaliz_bity_rsa
+            tekst = payload.decode().strip()
+            # Format: '<n_hex>:<e_hex>:<sig_hex>'
+            czesci = tekst.rsplit(':', 1)          # split od prawej — sig_hex nie zawiera ':'
+            sig_hex = czesci[1]
+            dane_klucza = czesci[0]                # '<n_hex>:<e_hex>' — to co serwer podpisał
+            n_hex, e_hex = dane_klucza.split(':', 1)
+            klucz_boba = (int(n_hex, 16), int(e_hex, 16))
+            podpis = bytes.fromhex(sig_hex)
+
+            if self._klucz_pub_ca is None:
+                # Brak klucza CA — zaakceptuj bez weryfikacji (backward compat)
+                self._on_status("PKI: brak klucza CA — certyfikat pominięty (tryb bez PKI)")
+                self.certyfikat_zweryfikowany = False
+                self._pub_boba = klucz_boba
+                self.wyslij_klucze_sesji_jako_alice()
+                return
+
+            ok = weryfikuj_podpis_rsa(dane_klucza.encode(), podpis, self._klucz_pub_ca)
+            if ok:
+                bity = normaliz_bity_rsa(klucz_boba[0])
+                self._on_status(
+                    f"PKI: certyfikat Boba ZWERYFIKOWANY — podpis CA poprawny RSA-{bity}"
+                )
+                self._logger.info("PKI: weryfikacja certyfikatu Boba: OK")
+                self.certyfikat_zweryfikowany = True
+                self._pub_boba = klucz_boba
+                self.wyslij_klucze_sesji_jako_alice()
+            else:
+                self.certyfikat_zweryfikowany = False
+                self._on_blad(
+                    "PKI: BŁĄD WERYFIKACJI CERTYFIKATU — podpis CA niepoprawny!"
+                )
+                self._on_blad(
+                    "Możliwy atak MITM: klucz pub Boba mógł zostać podmieniony"
+                )
+                self._logger.warning("PKI: weryfikacja certyfikatu FAILED")
+        except Exception as exc:
+            self._on_blad(f"PKI błąd parsowania certyfikatu: {exc}")
 
     def _odbierz_klucze_sesji(self, payload: bytes) -> None:
         """Bob: odszyfrowuje klucze sesji AES+HMAC kluczem prywatnym RSA."""
@@ -410,10 +448,9 @@ class KlientMessenger:
             enc_aes  = bytes.fromhex(enc_aes_hex)
             enc_hmac = bytes.fromhex(enc_hmac_hex)
 
-            self._on_status("Bob odszyfrowuje klucze sesji kluczem prywatnym RSA...")
-            k_aes, k_hmac = deszyfruj_klucze_sesji(
-                enc_aes, enc_hmac, self._klucze_rsa.klucz_prywatny
-            )
+            self._on_status("Bob odszyfrowuje klucze sesji kluczem prywatnym RSA (CRT)...")
+            k_aes  = deszyfruj_rsa_crt(enc_aes,  self._klucze_rsa).rjust(32, b'\x00')
+            k_hmac = deszyfruj_rsa_crt(enc_hmac, self._klucze_rsa).rjust(32, b'\x00')
             self._klucz_aes  = k_aes
             self._klucz_hmac = k_hmac
             self._session_id = 0    # Bob nie zna session_id — akceptuje dowolne
@@ -460,21 +497,6 @@ class KlientMessenger:
 
         except ValueError as e:
             self._on_blad(f"Błąd weryfikacji pakietu: {e}")
-
-    def _odbierz_steg_image(self, payload: bytes) -> None:
-        """Odbiera obraz PPM ze steganogramem wysłany przez drugą stronę."""
-        try:
-            idx = payload.index(b'\n')
-            nadawca = payload[:idx].decode('utf-8', errors='replace').strip()
-            ppm_dane = payload[idx + 1:]
-            self.ostatni_odebrany_steg = ppm_dane
-            self._logger.info(
-                f"[STEG] Odebrano obraz od '{nadawca}' ({len(ppm_dane)} B)"
-            )
-            self._on_status(f"[STEG] Odebrano obraz od {nadawca.capitalize()}")
-            self._on_steg_image(nadawca, ppm_dane)
-        except Exception as e:
-            self._on_blad(f"[STEG] Błąd odbioru obrazu: {e}")
 
     # ------------------------------------------------------------------
     # NARZĘDZIA SIECIOWE

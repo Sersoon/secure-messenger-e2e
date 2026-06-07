@@ -32,6 +32,7 @@ class _Sygnaly(QObject):
     sygnal_klienci             = pyqtSignal(list)
     sygnal_pakiet_przechwycony = pyqtSignal()
     sygnal_kolejka             = pyqtSignal(str, int)   # (nazwa_klienta, rozmiar)
+    sygnal_pki_fp              = pyqtSignal(str)        # fingerprint CA lub "— (PKI wyłączone)"
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ class OknoSerwera(QMainWindow):
         self._sygnaly.sygnal_klienci.connect(self._na_klienci)
         self._sygnaly.sygnal_pakiet_przechwycony.connect(self._na_pakiet_przechwycony)
         self._sygnaly.sygnal_kolejka.connect(self._na_kolejka)
+        self._sygnaly.sygnal_pki_fp.connect(lambda fp: self.lbl_ca_fp.setText(f"Fingerprint CA: {fp}"))
 
         # Stan odznaki klientów (połączenie + kolejka)
         self._polaczeni: list = []
@@ -197,6 +199,44 @@ class OknoSerwera(QMainWindow):
 
         layout.addWidget(grp_eve)
 
+        # PKI — serwer jako CA
+        grp_pki = QGroupBox("PKI — Serwer jako CA (certyfikacja kluczy)")
+        grp_pki.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold; color: #86efac;
+                border: 2px solid #14532d;
+                border-radius: 8px;
+                margin-top: 12px; padding-top: 10px;
+                background: #052e16;
+            }
+            QGroupBox::title { color: #86efac; left: 10px; padding: 0 5px; background: #052e16; }
+        """)
+        lay_pki = QVBoxLayout(grp_pki)
+
+        self.chk_pki = QCheckBox("Włącz PKI — serwer podpisuje klucze publiczne Boba")
+        self.chk_pki.setStyleSheet("""
+            QCheckBox { font-weight: bold; color: #86efac; }
+            QCheckBox::indicator:checked { background: #16a34a; border-color: #16a34a; }
+        """)
+        lay_pki.addWidget(self.chk_pki)
+
+        lbl_pki_opis = QLabel(
+            "  Alice weryfikuje podpis CA przy każdym odebranym kluczu pub Boba.\n"
+            "  Eve bez klucza prywatnego serwera nie może sfałszować certyfikatu.\n"
+            "  Uwaga: MITM + PKI = skompromitowany CA (serwer jest Eve)."
+        )
+        lbl_pki_opis.setStyleSheet("color: #6b7280; font-size: 9px; margin-left: 20px;")
+        lay_pki.addWidget(lbl_pki_opis)
+
+        self.lbl_ca_fp = QLabel("Fingerprint CA: — (PKI wyłączone)")
+        self.lbl_ca_fp.setFont(QFont("Consolas", 8))
+        self.lbl_ca_fp.setStyleSheet("color: #86efac; margin-left: 20px; font-size: 9px;")
+        self.lbl_ca_fp.setWordWrap(True)
+        lay_pki.addWidget(self.lbl_ca_fp)
+
+        self.chk_pki.toggled.connect(self._na_pki)
+        layout.addWidget(grp_pki)
+
         # Log
         grp_log = QGroupBox("Dziennik serwera")
         lay_log = QVBoxLayout(grp_log)
@@ -284,6 +324,34 @@ class OknoSerwera(QMainWindow):
             self._sygnaly.sygnal_log.emit(f"[BŁĄD] ustaw_mitm: {e}")
         finally:
             self.chk_mitm.setEnabled(True)
+
+    def _na_pki(self, wlaczony: bool) -> None:
+        self.chk_pki.setEnabled(False)
+        threading.Thread(
+            target=self._ustaw_pki_w_tle,
+            args=(wlaczony,),
+            daemon=True
+        ).start()
+
+    def _ustaw_pki_w_tle(self, wlaczony: bool) -> None:
+        try:
+            self._serwer.ustaw_pki(wlaczony)
+            if wlaczony:
+                klucz = self._serwer.klucz_pub_pki
+                if klucz:
+                    from secure_messenger.crypto.rsa import fingerprint_klucza
+                    n, e = klucz
+                    fp = fingerprint_klucza(n, e)
+                    bloki = '  '.join(fp[i:i+8] for i in range(0, len(fp), 8))
+                    self._sygnaly.sygnal_log.emit(f"[PKI] CA Fingerprint: {bloki}")
+                    # Zaktualizuj etykietę przez sygnał log (callback do GUI)
+                    self._sygnaly.sygnal_pki_fp.emit(bloki)
+            else:
+                self._sygnaly.sygnal_pki_fp.emit("— (PKI wyłączone)")
+        except Exception as exc:
+            self._sygnaly.sygnal_log.emit(f"[BŁĄD PKI] {exc}")
+        finally:
+            self.chk_pki.setEnabled(True)
 
     def _na_replay(self, wlaczony: bool) -> None:
         self._serwer.ustaw_replay(wlaczony)

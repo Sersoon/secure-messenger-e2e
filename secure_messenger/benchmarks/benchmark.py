@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from secure_messenger.crypto.rsa import (
-    generuj_klucze_rsa, szyfruj_rsa, deszyfruj_rsa, deszyfruj_rsa_crt
+    generuj_klucze_rsa, szyfruj_rsa, deszyfruj_rsa, deszyfruj_rsa_crt,
+    podpisz_rsa, weryfikuj_podpis_rsa,
 )
 from secure_messenger.crypto.aes_cbc import szyfruj_aes_cbc, deszyfruj_aes_cbc, zbuduj_pakiet, rozpakuj_pakiet
 from secure_messenger.crypto.hmac_sha256 import oblicz_hmac
@@ -346,13 +347,79 @@ def benchmark_rsa_crt(
         if s_crt > 0:
             przyspieszenie = s_naiwne / s_crt
             wyniki.append(WynikBenchmarku(
-                operacja=f"  → RSA-{bity} przyspieszenie CRT",
+                operacja=f"  -> RSA-{bity} przyspieszenie CRT",
                 sredni_czas_ms=0,
                 odch_std_ms=0,
                 min_ms=0,
                 max_ms=0,
                 liczba_powtorzen=0,
                 przepustowosc=f"{przyspieszenie:.1f}x szybciej",
+            ))
+
+    return wyniki
+
+
+# ---------------------------------------------------------------------------
+# BENCHMARKI PODPISU CYFROWEGO RSA (używane w PKI)
+# ---------------------------------------------------------------------------
+
+def benchmark_rsa_podpis(
+    rozmiary_bitow: list[int] = None,
+    powtorzenia: int = 10
+) -> list[WynikBenchmarku]:
+    """
+    Benchmarkuje podpisywanie i weryfikację RSA — operacje wykonywane przez PKI.
+
+    Podpisanie używa klucza prywatnego (C^d mod n — wolne jak deszyfrowanie).
+    Weryfikacja używa klucza publicznego (C^e mod n — szybka, e=65537 jest małe).
+    Asymetria jest celowa: CA podpisuje raz, klienci weryfikują wielokrotnie i szybko.
+    """
+    if rozmiary_bitow is None:
+        rozmiary_bitow = [1024, 2048]
+
+    wiadomosc = b"RSA_PUB:klucz_publiczny_boba"  # typowy payload certyfikowany przez CA
+    wyniki = []
+
+    for bity in rozmiary_bitow:
+        klucze = generuj_klucze_rsa(bity)
+        pub  = klucze.klucz_publiczny
+        priv = klucze.klucz_prywatny
+
+        # Podpisywanie (klucz prywatny CA — SHA-256 + C^d mod n)
+        s, o, mn, mx = _zmierz(
+            lambda pr=priv, m=wiadomosc: podpisz_rsa(m, pr),
+            powtorzenia=powtorzenia
+        )
+        wyniki.append(WynikBenchmarku(
+            operacja=f"RSA-{bity} podpis CA  (SHA-256 + C^d mod n)",
+            sredni_czas_ms=s, odch_std_ms=o, min_ms=mn, max_ms=mx,
+            liczba_powtorzen=powtorzenia,
+            przepustowosc=_przepustowosc_ops(s),
+        ))
+
+        # Weryfikacja (klucz publiczny — SHA-256 + C^e mod n, e=65537)
+        podpis = podpisz_rsa(wiadomosc, priv)
+        s, o, mn, mx = _zmierz(
+            lambda p=pub, m=wiadomosc, sig=podpis: weryfikuj_podpis_rsa(m, sig, p),
+            powtorzenia=powtorzenia
+        )
+        wyniki.append(WynikBenchmarku(
+            operacja=f"RSA-{bity} weryfik.  (SHA-256 + C^e mod n, e=65537)",
+            sredni_czas_ms=s, odch_std_ms=o, min_ms=mn, max_ms=mx,
+            liczba_powtorzen=powtorzenia,
+            przepustowosc=_przepustowosc_ops(s),
+        ))
+
+        # Asymetria: ile razy weryfikacja jest szybsza od podpisu
+        s_podpis = wyniki[-2].sredni_czas_ms
+        s_weryfik = wyniki[-1].sredni_czas_ms
+        if s_weryfik > 0:
+            ratio = s_podpis / s_weryfik
+            wyniki.append(WynikBenchmarku(
+                operacja=f"  -> RSA-{bity} asymetria podpis/weryfikacja",
+                sredni_czas_ms=0, odch_std_ms=0, min_ms=0, max_ms=0,
+                liczba_powtorzen=0,
+                przepustowosc=f"{ratio:.0f}× szybsza weryfikacja",
             ))
 
     return wyniki
@@ -449,6 +516,10 @@ def uruchom_wszystkie_benchmarki(
     for w in benchmark_rsa_crt(bity_rsa, powtorzenia=10):
         raport.dodaj(w)
 
+    postep("Benchmarkuję podpis cyfrowy RSA (PKI — CA sign/verify)...")
+    for w in benchmark_rsa_podpis(bity_rsa, powtorzenia=10):
+        raport.dodaj(w)
+
     postep("Benchmarkuję AES-256-CBC...")
     for w in benchmark_aes_cbc(powtorzenia=200):
         raport.dodaj(w)
@@ -480,6 +551,103 @@ def interpretuj_raport(raport: RaportBenchmarku) -> str:
     for w in raport.wyniki:
         wiersz = w.jako_wiersz()
         linie.append(f"  {wiersz[0]:<55} {wiersz[1]:>10}  {wiersz[6]}")
+    return "\n".join(linie)
+
+
+def generuj_interpretacje(raport: RaportBenchmarku) -> str:
+    """Generuje krotki komentarz do wynikow benchmarkow."""
+    idx: dict[str, WynikBenchmarku] = {w.operacja.strip(): w for w in raport.wyniki}
+
+    def ms(nazwa: str) -> float | None:
+        w = idx.get(nazwa)
+        return w.sredni_czas_ms if w and w.sredni_czas_ms > 0 else None
+
+    linie = []
+
+    # keygen
+    keygen_w = sorted(
+        [w for w in raport.wyniki if "generowanie kluczy" in w.operacja and w.sredni_czas_ms > 0],
+        key=lambda w: w.sredni_czas_ms
+    )
+    if len(keygen_w) >= 2:
+        kw_m, kw_d = keygen_w[0], keygen_w[-1]
+        ratio = kw_d.sredni_czas_ms / kw_m.sredni_czas_ms
+        n_m = kw_m.operacja.replace("generowanie kluczy", "").strip()
+        n_d = kw_d.operacja.replace("generowanie kluczy", "").strip()
+        linie.append(
+            f"Generowanie kluczy: {n_m} ~{kw_m.sredni_czas_ms:.0f} ms, "
+            f"{n_d} ~{kw_d.sredni_czas_ms:.0f} ms (ok. {ratio:.1f}x dluzej). "
+            f"Jednorazowe na sesje, wiec koszt akceptowalny."
+        )
+        linie.append("")
+
+    # RSA enc/dec asymetria
+    for bity in [2048, 1024]:
+        enc = ms(f"RSA-{bity} szyfrowanie (32 B)")
+        dec = ms(f"RSA-{bity} deszyfrowanie (32 B)")
+        if enc and dec:
+            ratio = dec / enc
+            linie.append(
+                f"RSA-{bity}: szyfrowanie (klucz pub.) {enc:.3f} ms, "
+                f"deszyfrowanie (klucz pryw.) {dec:.2f} ms -- roznica {ratio:.0f}x. "
+                f"Wynika z wielkosci eksponentu: e=65537 jest male, d jest duze."
+            )
+            linie.append("")
+            break
+
+    # hybryda RSA+AES
+    for bity in [2048, 1024]:
+        rsa = ms(f"RSA-{bity} deszyfrowanie (32 B)")
+        aes = ms("AES-256-CBC szyfrowanie (1 KB)")
+        if rsa and aes:
+            ratio = rsa / aes
+            linie.append(
+                f"Porownanie RSA vs AES: deszyfrowanie RSA-{bity} to {rsa:.2f} ms, "
+                f"szyfrowanie AES-256 1 KB to {aes:.3f} ms -- RSA jest ok. {ratio:.0f}x wolniejsze. "
+                f"To uzasadnia szyfrowanie hybrydowe: RSA tylko do wymiany klucza sesji, "
+                f"AES do wszystkich wiadomosci."
+            )
+            linie.append("")
+            break
+
+    # CRT
+    for bity in [2048, 1024]:
+        naive = ms(f"RSA-{bity} decrypt naiwne (C^d mod n)")
+        crt = ms(f"RSA-{bity} decrypt CRT (mod p + mod q)")
+        if naive and crt:
+            ratio = naive / crt
+            linie.append(
+                f"CRT vs naiwne (RSA-{bity}): {naive:.2f} ms -> {crt:.2f} ms, "
+                f"przyspieszenie {ratio:.1f}x. CRT rozklada C^d mod n na dwa mniejsze "
+                f"potegowania mod p i mod q -- matematycznie rownowazne, szybciej obliczeniowo."
+            )
+            linie.append("")
+            break
+
+    # podpis PKI
+    for bity in [2048, 1024]:
+        sign = ms(f"RSA-{bity} podpis CA  (SHA-256 + C^d mod n)")
+        verify = ms(f"RSA-{bity} weryfik.  (SHA-256 + C^e mod n, e=65537)")
+        if sign and verify:
+            ratio = sign / verify
+            linie.append(
+                f"Podpis cyfrowy RSA-{bity}: podpisanie {sign:.2f} ms, "
+                f"weryfikacja {verify:.3f} ms ({ratio:.0f}x szybsza). "
+                f"e=65537 ma tylko 17 jedynek binarnych -- square-and-multiply robi tu 17 mnozen. "
+                f"CA podpisuje certyfikat raz, klienci weryfikuja wielokrotnie i szybko."
+            )
+            linie.append("")
+            break
+
+    # HMAC
+    hmac = ms("HMAC-SHA256 (100 KB)")
+    aes_big = ms("AES-256-CBC szyfrowanie (100 KB)")
+    if hmac and aes_big:
+        linie.append(
+            f"HMAC-SHA256 vs AES-256 na 100 KB: {hmac:.2f} ms vs {aes_big:.2f} ms -- "
+            f"weryfikacja integralnosci nie dodaje istotnego nakladu obliczeniowego."
+        )
+
     return "\n".join(linie)
 
 

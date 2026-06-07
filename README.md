@@ -28,7 +28,7 @@ Projekt jest zorganizowany w niezależne warstwy z czytelną separacją odpowied
 ┌─────────────────────────────────────────────────────┐
 │                   GUI (PyQt6)                       │  gui/main_window.py
 │  Okno klienta: Czat, Kryptografia, Benchmarki,      │  gui/server_window.py
-│                Ataki/Analiza, Steganografia          │
+│                Ataki/Analiza                         │
 ├─────────────────────────────────────────────────────┤
 │               Warstwa sieciowa                      │  network/client.py
 │         TCP + protokół pakietów z nagłówkiem        │  network/server.py
@@ -60,9 +60,8 @@ Projekt jest zorganizowany w niezależne warstwy z czytelną separacją odpowied
 | Serwer | `network/server.py` | Router TCP, tryb MITM i Replay — tylko sieć |
 | Klient | `network/client.py` | Alice/Bob, wymiana kluczy, wątki odbioru |
 | Ataki (sieciowe) | `network/server.py` | MITM i Replay — interaktywne demo w GUI serwera |
-| Ataki (krypto) | `security/attacks.py` | ECB vs CBC, Replay bez nonce — eksperymenty offline |
-| Benchmarki | `benchmarks/benchmark.py` | Pomiary z odch. std., CRT vs naiwne, interpretacja |
-| Steganografia | `steganography/lsb.py` | LSB w obrazach PPM — kanał edukacyjny |
+| Ataki (krypto) | `security/attacks.py` | ECB vs CBC, Replay bez nonce, bit-flip — eksperymenty offline |
+| Benchmarki | `benchmarks/benchmark.py` | Pomiary z odch. std., CRT vs naiwne, podpis PKI, interpretacja |
 
 ---
 
@@ -143,8 +142,6 @@ Wszystkie kluczowe operacje zaimplementowane ręcznie bez bibliotek kryptografic
 | PKCS7 pad | `pkcs7_pad(dane)` | `aes_cbc.py:38` |
 | PKCS7 unpad z walidacją | `pkcs7_unpad(dane)` | `aes_cbc.py:74` |
 | Format pakietu sieciowego | `zbuduj_pakiet / rozpakuj_pakiet` | `aes_cbc.py:218` |
-| LSB steganografia PPM | `ukryj_wiadomosc / odczytaj_wiadomosc` | `lsb.py:98` |
-
 **Użycie bibliotek zewnętrznych (uzasadnione):**
 
 `cryptography.hazmat.primitives.ciphers` — wyłącznie do algorytmu blokowego AES (S-boxy, rundy szyfrujące AES). Wszystkie elementy protokołu (padding PKCS7, generowanie IV, format pakietu, HMAC, nonce) są własne. Wg wymagań projektu "dozwolone są operacje I/O i standardowe funkcje hashujące" — AES jako prymityw blokowy mieści się w tej kategorii.
@@ -257,7 +254,18 @@ Szyfrogram CBC:    [e3a1f7d2b8c4951a][2f6b9d0e4c37a851][8ab3e5f1d2c06947][c4912f
 
 ECB historycznie ujawnił strukturę bitmap (słynny "Linux Tux ECB penguin").
 
-### Demo 4: Atak padding oracle (zabezpieczony)
+### Demo 4: Manipulacja szyfrogramem — bit-flip i rola HMAC (`DemoManipulacjaSzyfrogramu` w `security/attacks.py`)
+
+Atakujący zmienia jeden bajt szyfrogramu w trakcie transmisji (XOR 0xFF na bajt 0 szyfrogramu).
+
+**Z HMAC (Encrypt-then-MAC):** odbiorca wykrywa modyfikację i odrzuca pakiet — HMAC niezgodny.
+**Bez HMAC:** deszyfrowanie przebiega bez błędu, ale plaintext jest uszkodzony — odbiorca nie wie, że dane zostały zmanipulowane.
+
+Właściwość bit-flip CBC: zmiana bajtu w bloku i niszczy cały blok i (16 B śmieci) i odwraca odpowiedni bit w bloku i+1 (przewidywalna zmiana). Znając plaintext atakujący może celowo zmodyfikować treść kolejnego bloku.
+
+**Uruchomienie:** Zakładka Ataki/Analiza → Demo 3 → przycisk „Uruchom bit-flip".
+
+### Demo 5: Atak padding oracle (zabezpieczony — wyjaśnienie)
 
 Bez Encrypt-then-MAC: atakujący modyfikuje ostatni bajt szyfrogramu, wysyła do serwera i obserwuje czy dostaje błąd paddingu (`ValueError`) czy nie. Po ~256 próbach poznaje ostatni bajt plaintextu. Powtarzając poznaje cały plaintext.
 
@@ -270,9 +278,9 @@ Bez Encrypt-then-MAC: atakujący modyfikuje ostatni bajt szyfrogramu, wysyła do
 Aby uruchomić benchmarki:
 ```bash
 python -c "
-from secure_messenger.benchmarks.benchmark import uruchom_wszystkie_benchmarki, interpretuj_raport
+from secure_messenger.benchmarks.benchmark import uruchom_wszystkie_benchmarki, generuj_interpretacje
 r = uruchom_wszystkie_benchmarki()
-print(interpretuj_raport(r))
+print(generuj_interpretacje(r))
 "
 ```
 
@@ -412,12 +420,9 @@ python -m secure_messenger.main
 
 ```bash
 python -c "
-from secure_messenger.benchmarks.benchmark import uruchom_wszystkie_benchmarki, interpretuj_raport
+from secure_messenger.benchmarks.benchmark import uruchom_wszystkie_benchmarki, generuj_interpretacje
 r = uruchom_wszystkie_benchmarki()
-for w in r.wyniki:
-    print(w.jako_wiersz())
-print()
-print(interpretuj_raport(r))
+print(generuj_interpretacje(r))
 "
 ```
 
@@ -431,18 +436,17 @@ print(interpretuj_raport(r))
 pytest secure_messenger/tests/test_crypto.py -v
 ```
 
-| Klasa testowa | Liczba testów | Pokrycie |
-|--------------|---------------|---------|
-| `TestModPow` | 6 | Twierdzenie Fermata, duże liczby, modulus=1 |
-| `TestEuklides` | 7 | NWD, odwrotność modularna, brak odwrotności |
-| `TestMillerRabin` | 15 | Liczby Carmichaela (561), Mersenne (2^31-1) |
-| `TestGenerowanieKluczyRSA` | 6 | Relacja e×d≡1 mod φ(n), minimalny rozmiar |
-| `TestSzyfrowanieRSA` | 8 | Roundtrip, za długa wiadomość, uszkodzony szyfrogram |
-| `TestHMACSHA256` | 13 | Zgodność ze stdlib, timing-safe, typy |
-| `TestPKCS7` | 11 | Wszystkie długości 0-100B, nieprawidłowy padding |
-| `TestAESCBC` | 12 | Roundtrip, różne IV, złe klucze |
-| `TestPakietSieciowy` | 8 | HMAC wykrywa modyfikację, replay logic |
-| `TestIntegracjaKryptograficzna` | 2 | Pełny przepływ Alice↔Bob |
-| `TestSteganografiaLSB` | 6 | Roundtrip, pojemność, tylko LSB zmieniony |
+| Klasa testowa | Pokrycie |
+|--------------|---------|
+| `TestModPow` | Twierdzenie Fermata, duże liczby, modulus=1 |
+| `TestEuklides` | NWD, odwrotność modularna, brak odwrotności |
+| `TestMillerRabin` | Liczby Carmichaela (561), Mersenne (2^31-1), parametryzacja |
+| `TestGenerowanieKluczyRSA` | Relacja e×d≡1 mod φ(n), minimalny rozmiar |
+| `TestSzyfrowanieRSA` | Roundtrip, za długa wiadomość, uszkodzony szyfrogram |
+| `TestHMACSHA256` | Zgodność ze stdlib, timing-safe, typy, HMAC pakietu |
+| `TestPKCS7` | Wszystkie długości 0-100B, nieprawidłowy padding |
+| `TestAESCBC` | Roundtrip, różne IV, złe klucze |
+| `TestPakietSieciowy` | HMAC wykrywa modyfikację, replay logic, różne rozmiary |
+| `TestIntegracjaKryptograficzna` | Pełny przepływ Alice↔Bob, wykrywanie replay |
 
 Weryfikacja poprawności implementacji HMAC: 5 testów porównuje wyniki `oblicz_hmac()` z `hmac.new()` ze stdlib Python dla kluczy o różnych długościach (16, 32, 64, 128 B i klucz pusty).

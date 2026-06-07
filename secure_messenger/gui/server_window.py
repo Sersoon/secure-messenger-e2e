@@ -90,7 +90,7 @@ class OknoSerwera(QMainWindow):
         layout.addWidget(tytul)
 
         # Status serwera
-        self.lbl_status = QLabel(f"Nasluchuję na 127.0.0.1:{self.port}")
+        self.lbl_status = QLabel(f"Nasłuchuję na 127.0.0.1:{self.port}")
         self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_status.setStyleSheet(
             "background: #27ae60; color: white; font-weight: bold; "
@@ -99,7 +99,7 @@ class OknoSerwera(QMainWindow):
         layout.addWidget(self.lbl_status)
 
         # Lista klientow
-        grp_klienci = QGroupBox("Polaczeni klienci")
+        grp_klienci = QGroupBox("Połączeni klienci")
         lay_k = QHBoxLayout(grp_klienci)
         self.lbl_alice = self._badge("Alice", "#7f8c8d")
         self.lbl_bob   = self._badge("Bob",   "#7f8c8d")
@@ -168,9 +168,9 @@ class OknoSerwera(QMainWindow):
         lay_e.addWidget(self.chk_replay)
 
         lay_replay_btn = QHBoxLayout()
-        lbl_replay_opis = QLabel("  Po przechwyceniu: kliknie Wyslij Replay →")
+        lbl_replay_opis = QLabel("  Po przechwyceniu: kliknij 'Wyślij Replay' →")
         lbl_replay_opis.setStyleSheet("color: #7f8c8d; font-size: 9px;")
-        self.btn_replay = QPushButton("Wyslij Replay!")
+        self.btn_replay = QPushButton("Wyślij Replay!")
         self.btn_replay.setEnabled(False)
         self._STYL_REPLAY_OFF = """
             QPushButton {
@@ -221,7 +221,7 @@ class OknoSerwera(QMainWindow):
         try:
             self._serwer.uruchom(w_tle=True)
         except Exception as e:
-            self.lbl_status.setText(f"BLAD: {e}")
+            self.lbl_status.setText(f"BŁĄD: {e}")
             self.lbl_status.setStyleSheet(
                 "background: #c0392b; color: white; padding: 5px; border-radius: 4px;"
             )
@@ -281,7 +281,7 @@ class OknoSerwera(QMainWindow):
         try:
             self._serwer.ustaw_mitm(wlaczony)
         except Exception as e:
-            self._sygnaly.sygnal_log.emit(f"[BLAD] ustaw_mitm: {e}")
+            self._sygnaly.sygnal_log.emit(f"[BŁĄD] ustaw_mitm: {e}")
         finally:
             self.chk_mitm.setEnabled(True)
 
@@ -294,7 +294,7 @@ class OknoSerwera(QMainWindow):
     def _na_wyslij_replay(self) -> None:
         ok = self._serwer.wyslij_replay()
         if not ok:
-            self._na_log("[??:??:??] Brak przechwyconeho pakietu do replay")
+            self._na_log("[??:??:??] Brak przechwyconego pakietu do replay")
 
     # ------------------------------------------------------------------
 

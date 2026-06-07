@@ -1,1 +1,0 @@
-# Pakiet komunikacji sieciowej

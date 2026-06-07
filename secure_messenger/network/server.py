@@ -109,32 +109,33 @@ class SerwerRoutera:
         self._mitm_wlaczony = wlaczony
         if wlaczony:
             from secure_messenger.crypto.rsa import generuj_klucze_rsa
-            self._log("EVE: generuje klucze RSA-512 (klucz do podstawienia)...")
-            self._eve_klucze_rsa = generuj_klucze_rsa(512)
-            self._log("EVE gotowa! Czekam na wymiane kluczy Alice↔Bob aby je przejac...")
+            bity_eve = 512
+            self._log(f"EVE: generuje klucze RSA-{bity_eve} (klucz do podstawienia)...")
+            self._eve_klucze_rsa = generuj_klucze_rsa(bity_eve)
+            self._log("Tryb MITM aktywny. Oczekuję na wymianę kluczy Alice↔Bob...")
         else:
             self._eve_klucze_rsa = None
             self._bob_klucz_pub = None
             self._eve_klucz_aes = None
             self._eve_klucz_hmac = None
-            self._log("Tryb MITM wylaczony")
+            self._log("Tryb MITM wyłączony")
 
     def ustaw_replay(self, wlaczony: bool) -> None:
         """Włącza/wyłącza tryb Replay — przechwytuje pierwszy MSG."""
         self._replay_wlaczony = wlaczony
         if wlaczony:
             self._przechwycony_pakiet = None
-            self._log("Tryb Replay wlaczony — czekam na pierwszy pakiet MSG...")
+            self._log("Tryb Replay włączony — oczekuję na pierwszy pakiet MSG...")
         else:
             self._przechwycony_pakiet = None
-            self._log("Tryb Replay wylaczony")
+            self._log("Tryb Replay wyłączony")
 
     def wyslij_replay(self) -> bool:
         """Wysyła przechwycony pakiet MSG ponownie → odbiorca wykrywa stary nonce."""
         if self._przechwycony_pakiet is None:
             return False
         cel, dane = self._przechwycony_pakiet
-        self._log(f"EVE REPLAY: wysylam stary pakiet do '{cel}' ({len(dane)} B) !")
+        self._log(f"REPLAY: ponowne wysłanie pakietu do '{cel}' ({len(dane)} B)")
         self._wyslij_do(cel, dane)
         return True
 
@@ -153,7 +154,7 @@ class SerwerRoutera:
         self._socket.listen(5)
         self._socket.settimeout(1.0)
         self._dziala.set()
-        self._log(f"Serwer nasluchuje na {self.host}:{self.port}")
+        self._log(f"Serwer nasłuchuje na {self.host}:{self.port}")
 
         if w_tle:
             watek = threading.Thread(
@@ -222,7 +223,7 @@ class SerwerRoutera:
             if nazwa is None:
                 return
 
-            self._log(f"{nazwa.capitalize()} polaczony ({adres[0]}:{adres[1]})")
+            self._log(f"{nazwa.capitalize()} połączony ({adres[0]}:{adres[1]})")
             self._powiadom_klientow()
             self._dostarcz_kolejke(nazwa)
 
@@ -232,7 +233,7 @@ class SerwerRoutera:
                     break
                 dlugosc = int.from_bytes(naglowek, 'big')
                 if dlugosc == 0 or dlugosc > 2_000_000:
-                    self._log(f"Nieprawidlowa dlugosc pakietu od '{nazwa}': {dlugosc}")
+                    self._log(f"Nieprawidłowa długość pakietu od '{nazwa}': {dlugosc}")
                     break
                 pakiet = self._odbierz_dokladnie(conn, dlugosc)
                 if pakiet is None:
@@ -243,12 +244,12 @@ class SerwerRoutera:
 
         except Exception as e:
             if self._dziala.is_set():
-                self._log(f"Blad obslugi '{nazwa}': {e}")
+                self._log(f"Błąd obsługi '{nazwa}': {e}")
         finally:
             if nazwa:
                 with self._blokada:
                     self._klienci.pop(nazwa, None)
-                self._log(f"{nazwa.capitalize()} rozlaczony")
+                self._log(f"{nazwa.capitalize()} rozłączony")
                 self._powiadom_klientow()
             try:
                 conn.close()
@@ -284,7 +285,7 @@ class SerwerRoutera:
             conn.sendall(b'OK\n')
             return nazwa
         except Exception as e:
-            self._log(f"Blad rejestracji: {e}")
+            self._log(f"Błąd rejestracji: {e}")
             return None
 
     # ------------------------------------------------------------------
@@ -315,8 +316,8 @@ class SerwerRoutera:
             if self._przechwycony_pakiet is None:
                 self._przechwycony_pakiet = (cel, dane)
                 self._log(
-                    f"EVE: przechwycono pakiet MSG od '{od}' ({len(dane)} B) "
-                    f"— gotowy do replay!"
+                    f"REPLAY: przechwycono pakiet MSG od '{od}' ({len(dane)} B) "
+                    f"— gotowy do wysłania"
                 )
                 self._on_pakiet_przechwycony()
 
@@ -340,7 +341,7 @@ class SerwerRoutera:
                     )
                 else:
                     log_msg = (
-                        f"Kolejka '{cel}' pelna ({_MAX_KOLEJKA}) — pakiet odrzucony"
+                        f"Kolejka '{cel}' pełna ({_MAX_KOLEJKA}) — pakiet odrzucony"
                     )
 
         if log_msg:
@@ -353,7 +354,7 @@ class SerwerRoutera:
         try:
             conn_cel.sendall(dane)
         except OSError as e:
-            self._log(f"Blad wysylania do '{cel}': {e}")
+            self._log(f"Błąd wysyłania do '{cel}': {e}")
 
     def _dostarcz_kolejke(self, nazwa: str) -> None:
         """Dostarcza zakolejkowane pakiety po ponownym połączeniu klienta."""
@@ -365,7 +366,7 @@ class SerwerRoutera:
 
         self._log(
             f"{nazwa.capitalize()}: dostarczam {len(pakiety)} zakolejkowanych "
-            f"pakiet(ow) z okresu rozlaczenia..."
+            f"pakietów z okresu rozłączenia..."
         )
         for pakiet in pakiety:
             self._wyslij_do(nazwa, pakiet)
@@ -386,14 +387,15 @@ class SerwerRoutera:
             czesc = tekst[len('RSA_PUB:'):]
             n_hex, e_hex = czesc.split(':', 1)
             self._bob_klucz_pub = (int(n_hex, 16), int(e_hex, 16))
-            bity = self._bob_klucz_pub[0].bit_length()
+            from secure_messenger.crypto.rsa import normaliz_bity_rsa
+            bity = normaliz_bity_rsa(self._bob_klucz_pub[0])
             self._log(f"EVE: PRZECHWYCONO klucz pub Boba RSA-{bity}!")
 
             # Wyslij Alice KLUCZ EVE zamiast Boba
             n_eve, e_eve = self._eve_klucze_rsa.klucz_publiczny
             nowy = f"RSA_PUB:{hex(n_eve)}:{hex(e_eve)}\n".encode()
             self._wyslij_do(cel, self._opakuj(nowy))
-            self._log("EVE: wyslano Alice SWOJ klucz pub (podszywanie pod Boba)")
+            self._log("MITM: wysłano Alice własny klucz publiczny (zastąpiono klucz Boba)")
         except Exception as e:
             self._log(f"MITM blad klucza pub: {e}")
 
@@ -423,8 +425,8 @@ class SerwerRoutera:
                 enc_aes_new, enc_hmac_new = szyfruj_klucze_sesji(k_aes, k_hmac, self._bob_klucz_pub)
                 nowy = f"RSA_KEYS:{enc_aes_new.hex()}:{enc_hmac_new.hex()}\n".encode()
                 self._wyslij_do(cel, self._opakuj(nowy))
-                self._log("EVE: przekazano klucze Bobowi (re-zaszyfrowane jego kluczem pub)")
-                self._log(">>> MITM ZAKONCZONY SUKCESEM — Eve zna AES i HMAC! <<<")
+                self._log("MITM: przekazano Bobowi klucze sesji (re-zaszyfrowane jego kluczem pub)")
+                self._log("MITM: przechwycono klucze sesji — aktywne podsłuchiwanie")
         except Exception as e:
             self._log(f"MITM blad kluczy sesji: {e}")
 
@@ -434,7 +436,7 @@ class SerwerRoutera:
             from secure_messenger.crypto.aes_cbc import rozpakuj_pakiet
             _, _, plaintext = rozpakuj_pakiet(pakiet, self._eve_klucz_aes, self._eve_klucz_hmac)
             decoded = plaintext.decode('utf-8', errors='replace')
-            self._log(f"MITM: naruszono poufnosc komunikacji [{od.upper()}]")
+            self._log(f"MITM: odszyfrowano wiadomość od {od.upper()}")
             self._log(f"Odczytana wiadomosc: \"{decoded}\"")
         except Exception:
             pass  # moze sie nie udac przy pierwszym pakiecie (rozne session_id)

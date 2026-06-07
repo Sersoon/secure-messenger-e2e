@@ -16,7 +16,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from secure_messenger.crypto.rsa import generuj_klucze_rsa, szyfruj_rsa, deszyfruj_rsa
+from secure_messenger.crypto.rsa import (
+    generuj_klucze_rsa, szyfruj_rsa, deszyfruj_rsa, deszyfruj_rsa_crt
+)
 from secure_messenger.crypto.aes_cbc import szyfruj_aes_cbc, deszyfruj_aes_cbc, zbuduj_pakiet, rozpakuj_pakiet
 from secure_messenger.crypto.hmac_sha256 import oblicz_hmac
 
@@ -75,22 +77,9 @@ class RaportBenchmarku:
 def _zmierz(
     funkcja: Callable,
     powtorzenia: int,
-    rozgrzewka: int = 1
 ) -> tuple[float, float, float, float]:
-    """
-    Mierzy czas wykonania funkcji.
-
-    Parametry:
-        funkcja     — wywoływalna bez argumentów
-        powtorzenia — liczba pomiarów
-        rozgrzewka  — liczba wywołań przed pomiarem (JIT, cache)
-
-    Zwraca:
-        (srednia_ms, odch_std_ms, min_ms, max_ms)
-    """
-    # Rozgrzewka (pomija pierwszy powolny wywołanie)
-    for _ in range(rozgrzewka):
-        funkcja()
+    """Mierzy czas wykonania funkcji. Zwraca (srednia_ms, odch_std_ms, min_ms, max_ms)."""
+    funkcja()
 
     czasy: list[float] = []
     for _ in range(powtorzenia):
@@ -148,7 +137,6 @@ def benchmark_rsa_keygen(
         s, o, mn, mx = _zmierz(
             lambda b=bity: generuj_klucze_rsa(b),
             powtorzenia=powtorzenia,
-            rozgrzewka=0  # RSA keygen jest powolne — nie marnujemy czasu
         )
         wyniki.append(WynikBenchmarku(
             operacja=f"RSA-{bity} generowanie kluczy",
@@ -298,6 +286,79 @@ def benchmark_hmac(
 
 
 # ---------------------------------------------------------------------------
+# BENCHMARK CRT vs NAIWNE RSA
+# ---------------------------------------------------------------------------
+
+def benchmark_rsa_crt(
+    rozmiary_bitow: list[int] = None,
+    powtorzenia: int = 10
+) -> list[WynikBenchmarku]:
+    """
+    Porównuje czas deszyfrowania RSA: naiwne (C^d mod n) vs CRT.
+
+    CRT (Chinese Remainder Theorem) wykonuje dwa mniejsze potęgowania
+    modularne (mod p i mod q zamiast mod n), co daje ~4× przyspieszenie.
+
+    Parametry:
+        rozmiary_bitow — rozmiary kluczy do przetestowania
+        powtorzenia    — liczba pomiarów dla każdego wariantu
+
+    Zwraca:
+        Lista wyników (pary naiwne/CRT dla każdego rozmiaru)
+    """
+    if rozmiary_bitow is None:
+        rozmiary_bitow = [1024, 2048]
+
+    wyniki = []
+    dane = os.urandom(32)
+
+    for bity in rozmiary_bitow:
+        klucze = generuj_klucze_rsa(bity)
+        pub = klucze.klucz_publiczny
+        priv = klucze.klucz_prywatny
+        szyfrogram = szyfruj_rsa(dane, pub)
+
+        # Naiwne: C^d mod n
+        s_naiwne, o, mn, mx = _zmierz(
+            lambda pr=priv, c=szyfrogram: deszyfruj_rsa(c, pr),
+            powtorzenia=powtorzenia
+        )
+        wyniki.append(WynikBenchmarku(
+            operacja=f"RSA-{bity} decrypt naiwne (C^d mod n)",
+            sredni_czas_ms=s_naiwne, odch_std_ms=o, min_ms=mn, max_ms=mx,
+            liczba_powtorzen=powtorzenia,
+            przepustowosc=_przepustowosc_ops(s_naiwne),
+        ))
+
+        # CRT: dwa potęgowania mod p/q
+        s_crt, o, mn, mx = _zmierz(
+            lambda kl=klucze, c=szyfrogram: deszyfruj_rsa_crt(c, kl),
+            powtorzenia=powtorzenia
+        )
+        wyniki.append(WynikBenchmarku(
+            operacja=f"RSA-{bity} decrypt CRT (mod p + mod q)",
+            sredni_czas_ms=s_crt, odch_std_ms=o, min_ms=mn, max_ms=mx,
+            liczba_powtorzen=powtorzenia,
+            przepustowosc=_przepustowosc_ops(s_crt),
+        ))
+
+        # Informacja o przyspieszeniu (zapisana jako pseudo-wiersz)
+        if s_crt > 0:
+            przyspieszenie = s_naiwne / s_crt
+            wyniki.append(WynikBenchmarku(
+                operacja=f"  → RSA-{bity} przyspieszenie CRT",
+                sredni_czas_ms=0,
+                odch_std_ms=0,
+                min_ms=0,
+                max_ms=0,
+                liczba_powtorzen=0,
+                przepustowosc=f"{przyspieszenie:.1f}x szybciej",
+            ))
+
+    return wyniki
+
+
+# ---------------------------------------------------------------------------
 # BENCHMARK KOMPLETNEGO PAKIETU
 # ---------------------------------------------------------------------------
 
@@ -384,6 +445,10 @@ def uruchom_wszystkie_benchmarki(
     for w in benchmark_rsa_enc_dec(bity_rsa, powtorzenia=10):
         raport.dodaj(w)
 
+    postep("Benchmarkuję CRT vs naiwne deszyfrowanie RSA...")
+    for w in benchmark_rsa_crt(bity_rsa, powtorzenia=10):
+        raport.dodaj(w)
+
     postep("Benchmarkuję AES-256-CBC...")
     for w in benchmark_aes_cbc(powtorzenia=200):
         raport.dodaj(w)
@@ -404,6 +469,19 @@ def uruchom_wszystkie_benchmarki(
 # ---------------------------------------------------------------------------
 # NARZĘDZIA
 # ---------------------------------------------------------------------------
+
+def interpretuj_raport(raport: RaportBenchmarku) -> str:
+    """Zwraca tekstowe podsumowanie raportu benchmarków gotowe do wydruku."""
+    linie = [
+        f"Wyniki benchmarków ({len(raport.wyniki)} pomiarów,"
+        f" {raport.czas_calkowity_s:.1f}s łącznie):",
+        "",
+    ]
+    for w in raport.wyniki:
+        wiersz = w.jako_wiersz()
+        linie.append(f"  {wiersz[0]:<55} {wiersz[1]:>10}  {wiersz[6]}")
+    return "\n".join(linie)
+
 
 def _formatuj_rozmiar(bajty: int) -> str:
     """Formatuje rozmiar bajtów do czytelnej postaci."""

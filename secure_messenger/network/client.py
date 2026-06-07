@@ -24,7 +24,8 @@ from typing import Callable, Optional
 
 from secure_messenger.crypto.rsa import (
     generuj_klucze_rsa, KluczeRSA,
-    szyfruj_klucze_sesji, deszyfruj_klucze_sesji
+    szyfruj_klucze_sesji, deszyfruj_klucze_sesji,
+    normaliz_bity_rsa,
 )
 from secure_messenger.crypto.aes_cbc import zbuduj_pakiet, rozpakuj_pakiet
 
@@ -159,7 +160,7 @@ class KlientMessenger:
             # przywroc tryb bezpieczny bez ponownej wymiany RSA.
             if self._klucz_aes is not None and self._klucz_hmac is not None:
                 self._sesja_aktywna = True
-                self._on_status("SECURE MODE przywrocony — klucze sesji z poprzedniej sesji")
+                self._on_status("SECURE MODE przywrócony — klucze sesji z poprzedniej sesji")
 
             return True
 
@@ -248,9 +249,9 @@ class KlientMessenger:
         self._session_id = int.from_bytes(os.urandom(4), 'big')
         self._sesja_aktywna = True
 
-        self._on_status("RSA Key Exchange zakonczony")
+        self._on_status("RSA Key Exchange zakończony")
         self._on_status("AES-256: aktywny | HMAC-SHA256: aktywny")
-        self._on_status("SECURE MODE wlaczony")
+        self._on_status("SECURE MODE włączony")
         self._logger.info("Klucze sesji wysłane i zapisane przez Alice")
 
     # ------------------------------------------------------------------
@@ -391,7 +392,7 @@ class KlientMessenger:
             tekst = payload.decode().strip()
             n_hex, e_hex = tekst.split(':')
             self._pub_boba = (int(n_hex, 16), int(e_hex, 16))
-            bity = self._pub_boba[0].bit_length()
+            bity = normaliz_bity_rsa(self._pub_boba[0])
             self._logger.info(f"Odebrano klucz publiczny RSA-{bity} od Boba")
             self._on_status(f"Alice odebrała klucz publiczny RSA-{bity} od Boba")
             # Alice automatycznie wysyła klucze sesji
@@ -419,9 +420,9 @@ class KlientMessenger:
             self._nonce_odebrany = 0  # reset nonce dla nowej sesji
             self._sesja_aktywna  = True
 
-            self._on_status("RSA Key Exchange zakonczony")
+            self._on_status("RSA Key Exchange zakończony")
             self._on_status("AES-256: aktywny | HMAC-SHA256: aktywny")
-            self._on_status("SECURE MODE wlaczony")
+            self._on_status("SECURE MODE włączony")
             self._logger.info("Klucze sesji odszyfrowane przez Boba")
         except Exception as e:
             self._on_blad(f"Błąd odszyfrowania kluczy sesji: {e}")
@@ -445,7 +446,7 @@ class KlientMessenger:
                 if nonce <= self._nonce_odebrany and self._nonce_odebrany > 0:
                     self._on_blad(f"REPLAY ATTACK wykryty!")
                     self._on_blad(
-                        f"Powod: nonce={nonce} zostal juz wykorzystany "
+                        f"Powód: nonce={nonce} został już wykorzystany "
                         f"(ostatni={self._nonce_odebrany})"
                     )
                     self._on_blad("Pakiet odrzucony")

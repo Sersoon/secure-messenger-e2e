@@ -2,15 +2,15 @@
 Okno klienta — jeden uczestnik: Alice albo Bob.
 
 Kazde okno to oddzielny uzytkownik z:
-    - Widocznym na gorze paskiem statusu (ROZLACZONA / POLACZONA / SECURE)
-    - Przyciskiem "Polacz" i (dla Boba) "Wymien klucze RSA"
-    - Zakladka Czat: historia + szczegoly kryptograficzne (IV/szyfrogram/HMAC)
-    - Zakladka Kryptografia: klucze RSA i sesji
-    - Zakladka Benchmarki: pomiary wydajnosci
+    - Widocznym na gorze paskiem statusu (ROZLĄCZONA / POŁĄCZONA / SECURE)
+    - Przyciskiem "Połącz" i (dla Boba) "Wymień klucze RSA"
+    - Zakładka Czat: historia + szczegóły kryptograficzne (IV/szyfrogram/HMAC)
+    - Zakładka Kryptografia: klucze RSA i sesji
+    - Zakładka Benchmarki: pomiary wydajności
 
-Brak duplikatow wiadomosci:
+Brak duplikatów wiadomości:
     _wyslij()        → lokalne echo "Ja: ..."       (tylko u nadawcy)
-    _na_wiadomosc()  → wiadomosc od drugiej strony  (tylko u odbiorcy)
+    _na_wiadomosc()  → wiadomość od drugiej strony  (tylko u odbiorcy)
 """
 
 import threading
@@ -28,7 +28,8 @@ from PyQt6.QtGui import QFont, QColor, QTextCursor
 
 from secure_messenger.network.client import KlientMessenger
 from secure_messenger.benchmarks.benchmark import uruchom_wszystkie_benchmarki, WynikBenchmarku
-from secure_messenger.security.attacks import AtakMITM, AtakReplay, DemoBezNonce
+from secure_messenger.security.attacks import DemoECBvsCBC, DemoBezNonce
+
 
 
 # ---------------------------------------------------------------------------
@@ -99,57 +100,6 @@ class WatekKlienta(QThread):
                 self._poprzedni_tryb = aktualny
 
 
-class WatekAtaku(QThread):
-    """Uruchamia symulacje atakow w tle (nie blokuje GUI)."""
-    sygnal_krok   = pyqtSignal(str, str)   # (numer, opis kroku)
-    sygnal_gotowy = pyqtSignal(str)        # podsumowanie wynikow
-
-    def __init__(self, rodzaj: str, parametry: dict):
-        super().__init__()
-        self.rodzaj = rodzaj
-        self.parametry = parametry
-
-    def run(self) -> None:
-        def postep(nr, opis):
-            self.sygnal_krok.emit(str(nr), opis)
-
-        if self.rodzaj == 'mitm':
-            atak = AtakMITM()
-            wynik = atak.symuluj(
-                wiadomosci_alice=self.parametry.get('wiadomosci', ['Test']),
-                modyfikacja=self.parametry.get('modyfikacja'),
-                bity_rsa=self.parametry.get('bity', 512),
-                on_postep=postep,
-            )
-            self.sygnal_gotowy.emit(
-                f"Wiadomosci Eve: {len(wynik.wiadomosci_eve)} | "
-                f"Modyfikacje: {len(wynik.wiadomosci_zmodyfikowane)} | "
-                f"MITM: {'UDANY' if wynik.sukces else 'NIEUDANY'}"
-            )
-        elif self.rodzaj == 'replay':
-            atak = AtakReplay()
-            wynik = atak.symuluj(
-                wiadomosc=self.parametry.get('wiadomosc', 'Test'),
-                ile_replay=self.parametry.get('ile_replay', 3),
-                on_postep=postep,
-            )
-            self.sygnal_gotowy.emit(
-                f"Replay prob: {wynik.pakiety_replay} | "
-                f"Wykryte: {wynik.pakiety_wykryte} | "
-                f"Ochrona: {'SKUTECZNA' if not wynik.sukces_ataku else 'NARUSZONA'}"
-            )
-        elif self.rodzaj == 'demo_bez_nonce':
-            demo = DemoBezNonce()
-            wynik = demo.symuluj_bez_ochrony(
-                wiadomosc=self.parametry.get('wiadomosc', 'Przelej 500 zl'),
-                on_postep=postep,
-            )
-            self.sygnal_gotowy.emit(
-                f"Replay BEZ nonce: {wynik['replay_udane']}/3 przeszly — "
-                f"{'BRAK OCHRONY!' if wynik['replay_udane'] > 0 else 'OK'}"
-            )
-
-
 class WatekBenchmarku(QThread):
     sygnal_postep = pyqtSignal(str)
     sygnal_wyniki = pyqtSignal(object)
@@ -179,8 +129,8 @@ class ZakladkaCzat(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # Historia wiadomosci
-        grp_hist = QGroupBox("Historia wiadomosci")
+        # Historia wiadomości
+        grp_hist = QGroupBox("Historia wiadomości")
         lay_h = QVBoxLayout(grp_hist)
         self.historia = QTextEdit()
         self.historia.setReadOnly(True)
@@ -188,8 +138,8 @@ class ZakladkaCzat(QWidget):
         lay_h.addWidget(self.historia)
         splitter.addWidget(grp_hist)
 
-        # Szczegoly kryptograficzne ostatniej wyslane wiadomosci
-        grp_krypto = QGroupBox("Szczegoly ostatniego wyslaneogo pakietu (AES-CBC)")
+        # Szczegóły kryptograficzne ostatniego wysłanego pakietu
+        grp_krypto = QGroupBox("Szczegóły ostatniego wysłanego pakietu (AES-CBC)")
         lay_kr = QVBoxLayout(grp_krypto)
         self.txt_iv     = QLineEdit(); self.txt_iv.setReadOnly(True)
         self.txt_cipher = QLineEdit(); self.txt_cipher.setReadOnly(True)
@@ -218,13 +168,13 @@ class ZakladkaCzat(QWidget):
 
         layout.addWidget(splitter)
 
-        # Pole wysylania
-        grp_wyslij = QGroupBox("Wyslij wiadomosc")
+        # Pole wysyłania
+        grp_wyslij = QGroupBox("Wyślij wiadomość")
         lay_w = QHBoxLayout(grp_wyslij)
         self.pole_wiad = QLineEdit()
-        self.pole_wiad.setPlaceholderText("Wpisz wiadomosc i nacisnij Enter lub Wyslij...")
+        self.pole_wiad.setPlaceholderText("Wpisz wiadomość i naciśnij Enter lub Wyślij...")
         self.pole_wiad.setEnabled(False)
-        self.btn_wyslij = QPushButton("Wyslij")
+        self.btn_wyslij = QPushButton("Wyślij")
         self.btn_wyslij.setFixedWidth(90)
         self.btn_wyslij.setEnabled(False)
         lay_w.addWidget(self.pole_wiad)
@@ -263,9 +213,9 @@ class ZakladkaKryptografia(QWidget):
         if rola == 'bob':
             grp1 = QGroupBox("Moje klucze RSA (wygenerowane przez Boba)")
             lay1 = QVBoxLayout(grp1)
-            self.txt_n = self._linia("Modul n (hex):")
-            self.txt_e = self._linia("Wykl. publ. e:")
-            self.txt_d = self._linia("Wykl. pryw. d:")
+            self.txt_n = self._linia("Moduł n (hex):")
+            self.txt_e = self._linia("Wykł. publ. e:")
+            self.txt_d = self._linia("Wykł. pryw. d:")
             for w in [self.txt_n, self.txt_e, self.txt_d]:
                 lay1.addWidget(w)
             layout.addWidget(grp1)
@@ -280,14 +230,14 @@ class ZakladkaKryptografia(QWidget):
         else:
             grp1 = QGroupBox("Klucz publiczny Boba (odebrany przez Alice)")
             lay1 = QVBoxLayout(grp1)
-            self.txt_n = self._linia("Modul n (hex):")
-            self.txt_e = self._linia("Wykl. publ. e:")
+            self.txt_n = self._linia("Moduł n (hex):")
+            self.txt_e = self._linia("Wykł. publ. e:")
             self.txt_d = None
             for w in [self.txt_n, self.txt_e]:
                 lay1.addWidget(w)
             layout.addWidget(grp1)
 
-            grp2 = QGroupBox("Moje klucze sesji (wygenerowane, wyslane RSA-em)")
+            grp2 = QGroupBox("Moje klucze sesji (wygenerowane, wysłane RSA-em)")
             lay2 = QVBoxLayout(grp2)
             self.txt_aes  = self._linia("Klucz AES-256 (hex):")
             self.txt_hmac = self._linia("Klucz HMAC (hex):")
@@ -304,7 +254,7 @@ class ZakladkaKryptografia(QWidget):
         lay_log.addWidget(self.log_kroki)
         layout.addWidget(grp_log)
 
-        self.lbl_secure = QLabel("Oczekiwanie na wymiane kluczy...")
+        self.lbl_secure = QLabel("Oczekiwanie na wymianę kluczy...")
         self.lbl_secure.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self.lbl_secure.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_secure.setStyleSheet("color: gray; padding: 6px;")
@@ -343,7 +293,7 @@ class ZakladkaKryptografia(QWidget):
                 "color: white; background: #27ae60; padding: 6px; border-radius: 4px;"
             )
         else:
-            self.lbl_secure.setText("Oczekiwanie na wymiane kluczy...")
+            self.lbl_secure.setText("Oczekiwanie na wymianę kluczy...")
             self.lbl_secure.setStyleSheet("color: gray; padding: 6px;")
 
 
@@ -403,121 +353,7 @@ class ZakladkaBenchmarki(QWidget):
                 else:
                     item.setForeground(QColor("#e5e7eb"))
                 self.tabela.setItem(r, c, item)
-        self.lbl_czas.setText(f"Czas calkowity: {raport.czas_calkowity_s:.1f}s")
-
-
-# ---------------------------------------------------------------------------
-# ZAKŁADKA: SECURITY LAB (symulacje standalone z attacks.py)
-# ---------------------------------------------------------------------------
-
-class ZakladkaSecurityLab(QWidget):
-    """
-    Prezentuje trzy standalone symulacje z attacks.py:
-      1. Replay z nonce  — 0/3 przechodzi (ochrona dziala)
-      2. Replay bez nonce — 3/3 przechodzi (brak ochrony)
-      3. MITM standalone  — krok-po-kroku z logami
-    Uzupelnia live demos w oknie serwera.
-    """
-
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-
-        tytul = QLabel("Security Lab — Symulacje Algorytmiczne")
-        tytul.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        layout.addWidget(tytul)
-
-        opis = QLabel(
-            "Symulacje standalone (bez sieci TCP). "
-            "Live ataki MITM i Replay sa dostepne w oknie Serwera."
-        )
-        opis.setStyleSheet("color: #7f8c8d; font-size: 9px;")
-        layout.addWidget(opis)
-
-        # --- Replay z nonce ---
-        grp_replay = QGroupBox("Replay Attack — z ochrona nonce (powinno byc 0/3)")
-        lay_r = QVBoxLayout(grp_replay)
-        ktrle_r = QHBoxLayout()
-        self.pole_wiad_replay = QLineEdit("Przelej 1000 zl na konto Ewy")
-        self.btn_replay = QPushButton("Uruchom Replay")
-        self.btn_replay.setFixedWidth(140)
-        ktrle_r.addWidget(QLabel("Wiadomosc:")); ktrle_r.addWidget(self.pole_wiad_replay)
-        ktrle_r.addWidget(self.btn_replay)
-        lay_r.addLayout(ktrle_r)
-        self.log_replay = QTextEdit()
-        self.log_replay.setReadOnly(True)
-        self.log_replay.setMaximumHeight(100)
-        self.log_replay.setFont(QFont("Consolas", 8))
-        lay_r.addWidget(self.log_replay)
-        self.lbl_wynik_replay = QLabel("")
-        self.lbl_wynik_replay.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        lay_r.addWidget(self.lbl_wynik_replay)
-        layout.addWidget(grp_replay)
-
-        # --- Demo bez nonce ---
-        grp_demo = QGroupBox("Demo: Replay BEZ nonce — 3/3 przechodzi (dlaczego nonce jest konieczny)")
-        grp_demo.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold; color: #fca5a5;
-                border: 2px solid #7f1d1d;
-                border-radius: 8px;
-                margin-top: 12px; padding-top: 10px;
-                background: #1a0808;
-            }
-            QGroupBox::title {
-                color: #fca5a5; left: 8px;
-                padding: 0 5px; background: #1a0808;
-            }
-        """)
-        lay_d = QVBoxLayout(grp_demo)
-        self.btn_bez_nonce = QPushButton("Uruchom demo — pokazuje atak ktory by przeszedl bez nonce")
-        lay_d.addWidget(self.btn_bez_nonce)
-        self.log_bez_nonce = QTextEdit()
-        self.log_bez_nonce.setReadOnly(True)
-        self.log_bez_nonce.setMaximumHeight(90)
-        self.log_bez_nonce.setFont(QFont("Consolas", 8))
-        lay_d.addWidget(self.log_bez_nonce)
-        self.lbl_wynik_demo = QLabel("")
-        self.lbl_wynik_demo.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        lay_d.addWidget(self.lbl_wynik_demo)
-        layout.addWidget(grp_demo)
-
-        # --- MITM standalone ---
-        grp_mitm = QGroupBox("MITM — symulacja krok po kroku (standalone)")
-        lay_m = QVBoxLayout(grp_mitm)
-        ktrle_m = QHBoxLayout()
-        self.combo_bity_mitm = QComboBox()
-        self.combo_bity_mitm.addItems(["RSA-512 (szybki)", "RSA-1024"])
-        self.combo_tryb = QComboBox()
-        self.combo_tryb.addItems(["Tylko podsluch", "Podsluch + modyfikacja"])
-        self.btn_mitm = QPushButton("Uruchom MITM")
-        self.btn_mitm.setFixedWidth(130)
-        ktrle_m.addWidget(QLabel("RSA:")); ktrle_m.addWidget(self.combo_bity_mitm)
-        ktrle_m.addWidget(QLabel("Tryb:")); ktrle_m.addWidget(self.combo_tryb)
-        ktrle_m.addStretch(); ktrle_m.addWidget(self.btn_mitm)
-        lay_m.addLayout(ktrle_m)
-        self.log_mitm = QTextEdit()
-        self.log_mitm.setReadOnly(True)
-        self.log_mitm.setMaximumHeight(150)
-        self.log_mitm.setFont(QFont("Consolas", 8))
-        lay_m.addWidget(self.log_mitm)
-        self.lbl_wynik_mitm = QLabel("")
-        self.lbl_wynik_mitm.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        lay_m.addWidget(self.lbl_wynik_mitm)
-        layout.addWidget(grp_mitm)
-
-    def _kolor(self, opis: str) -> str:
-        if any(s in opis for s in ("WYKRY", "SKUTECZNA", "POPRAWNY", "ochrona")):
-            return "#4ade80"
-        if any(s in opis for s in ("UDANY", "Eve", "REPLAY", "przeszl", "BRAK", "MITM")):
-            return "#f87171"
-        return "#9ca3af"
-
-    def dodaj_krok(self, log: QTextEdit, nr: str, opis: str) -> None:
-        kolor = self._kolor(opis)
-        log.append(f'<span style="color:{kolor};">[{nr}] {opis}</span>')
-        log.moveCursor(QTextCursor.MoveOperation.End)
+        self.lbl_czas.setText(f"Czas całkowity: {raport.czas_calkowity_s:.1f}s")
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +363,7 @@ class ZakladkaSecurityLab(QWidget):
 class ZakladkaSteganografia(QWidget):
     """Demo steganografii LSB — ukrywanie tekstu w obrazie PPM krok po kroku."""
 
-    sygnal_wyslij_steg = pyqtSignal(bytes)  # emitowany gdy user kliknie "Ukryj i wyslij"
+    sygnal_wyslij_steg = pyqtSignal(bytes)  # emitowany gdy user kliknie "Ukryj i wyślij"
 
     def __init__(self):
         super().__init__()
@@ -578,11 +414,11 @@ class ZakladkaSteganografia(QWidget):
         grp2 = QGroupBox("Krok 2 — Ukryj wiadomość w obrazie")
         lay2 = QVBoxLayout(grp2)
         row2 = QHBoxLayout()
-        self.pole_wiad = QLineEdit("Tajna wiadomosc: klucz_AES=1A2B3C4D5E6F7890")
+        self.pole_wiad = QLineEdit("Tajna wiadomość: klucz_AES=1A2B3C4D5E6F7890")
         self.btn_ukryj = QPushButton("Ukryj w obrazie")
         self.btn_ukryj.setFixedWidth(140)
         self.btn_ukryj.setEnabled(False)
-        row2.addWidget(QLabel("Wiadomosc:"))
+        row2.addWidget(QLabel("Wiadomość:"))
         row2.addWidget(self.pole_wiad)
         row2.addWidget(self.btn_ukryj)
         lay2.addLayout(row2)
@@ -592,16 +428,16 @@ class ZakladkaSteganografia(QWidget):
         layout.addWidget(grp2)
 
         # Krok 3 — odczyt
-        grp3 = QGroupBox("Krok 3 — Odczytaj wiadomosc ze steganogramu")
+        grp3 = QGroupBox("Krok 3 — Odczytaj wiadomość ze steganogramu")
         lay3 = QVBoxLayout(grp3)
         row3 = QHBoxLayout()
-        self.btn_odczytaj = QPushButton("Odczytaj wiadomosc")
+        self.btn_odczytaj = QPushButton("Odczytaj wiadomość")
         self.btn_odczytaj.setFixedWidth(160)
         self.btn_odczytaj.setEnabled(False)
         self.pole_odczyt = QLineEdit()
         self.pole_odczyt.setReadOnly(True)
         self.pole_odczyt.setFont(QFont("Consolas", 9))
-        self.pole_odczyt.setPlaceholderText("— tutaj pojawi sie odczytana wiadomosc —")
+        self.pole_odczyt.setPlaceholderText("— tutaj pojawi się odczytana wiadomość —")
         row3.addWidget(self.btn_odczytaj)
         row3.addWidget(self.pole_odczyt)
         lay3.addLayout(row3)
@@ -611,7 +447,7 @@ class ZakladkaSteganografia(QWidget):
         layout.addWidget(grp3)
 
         # Krok 4 — wizualizacja LSB
-        grp4 = QGroupBox("Krok 4 — Wizualizacja LSB (pierwsze 16 bajtow pikseli w formacie binarnym)")
+        grp4 = QGroupBox("Krok 4 — Wizualizacja LSB (pierwsze 16 bajtów pikseli w formacie binarnym)")
         lay4 = QVBoxLayout(grp4)
         opis4 = QLabel(
             "Ostatni bit (LSB) każdego bajtu zaznaczony kolorem — "
@@ -624,7 +460,7 @@ class ZakladkaSteganografia(QWidget):
 
         row4 = QHBoxLayout()
 
-        grp_przed = QGroupBox("Oryginal (przed ukryciem)")
+        grp_przed = QGroupBox("Oryginał (przed ukryciem)")
         lay_przed = QVBoxLayout(grp_przed)
         self.txt_przed = QTextEdit()
         self.txt_przed.setReadOnly(True)
@@ -650,18 +486,18 @@ class ZakladkaSteganografia(QWidget):
         layout.addWidget(grp4)
 
         # Krok 5 — wysyłanie i odbieranie przez sieć TCP
-        grp5 = QGroupBox("Krok 5 — Wysylanie i odbieranie przez siec TCP")
+        grp5 = QGroupBox("Krok 5 — Wysyłanie i odbieranie przez sieć TCP")
         lay5 = QVBoxLayout(grp5)
 
         row5a = QHBoxLayout()
-        self.lbl_polaczenie_steg = QLabel("Brak polaczenia z serwerem")
+        self.lbl_polaczenie_steg = QLabel("Brak połączenia z serwerem")
         self.lbl_polaczenie_steg.setStyleSheet("color: #9ca3af; font-size: 9px;")
         row5a.addWidget(self.lbl_polaczenie_steg)
         row5a.addStretch()
         lay5.addLayout(row5a)
 
         row5b = QHBoxLayout()
-        self.btn_ukryj_i_wyslij = QPushButton("Ukryj i wyslij do drugiej strony")
+        self.btn_ukryj_i_wyslij = QPushButton("Ukryj i wyślij do drugiej strony")
         self.btn_ukryj_i_wyslij.setFixedWidth(240)
         self.btn_ukryj_i_wyslij.setEnabled(False)
         self.btn_ukryj_i_wyslij.setStyleSheet("""
@@ -685,7 +521,7 @@ class ZakladkaSteganografia(QWidget):
         self.pole_odczyt_odebrany = QLineEdit()
         self.pole_odczyt_odebrany.setReadOnly(True)
         self.pole_odczyt_odebrany.setFont(QFont("Consolas", 9))
-        self.pole_odczyt_odebrany.setPlaceholderText("— odczytana wiadomosc z odebranego obrazu —")
+        self.pole_odczyt_odebrany.setPlaceholderText("— odczytana wiadomość z odebranego obrazu —")
         row5c.addWidget(self.btn_odczytaj_odebrany)
         row5c.addWidget(self.pole_odczyt_odebrany)
         lay5.addLayout(row5c)
@@ -720,8 +556,8 @@ class ZakladkaSteganografia(QWidget):
         self.lbl_info_obrazu.setText(
             f"Obraz {info['szerokosc']}×{info['wysokosc']} px  |  "
             f"Piksele: {info['piksele']:,}  |  "
-            f"Pojemnosc: {info['pojemnosc_opis']}  "
-            f"({info['pojemnosc_bajtow'] * 8:,} bitow nosnych)"
+            f"Pojemność: {info['pojemnosc_opis']}  "
+            f"({info['pojemnosc_bajtow'] * 8:,} bitów nośnych)"
         )
         self.lbl_info_obrazu.setStyleSheet("color: #4ade80; font-size: 9px;")
         self.btn_ukryj.setEnabled(True)
@@ -742,16 +578,16 @@ class ZakladkaSteganografia(QWidget):
             bity = ukryj_wiadomosc(self._sciezka_oryg, self._sciezka_stego, wiad)
             rozmiar_obrazu = os.path.getsize(self._sciezka_stego)
             self.lbl_wynik_ukrycia.setText(
-                f"Ukryto {len(wiad)} B ({len(wiad) * 8} bitow)  |  "
-                f"Zmodyfikowano {bity} LSB z {rozmiar_obrazu} bajtow obrazu  "
-                f"({bity / rozmiar_obrazu * 100:.2f}% bajtow tknietych)"
+                f"Ukryto {len(wiad)} B ({len(wiad) * 8} bitów)  |  "
+                f"Zmodyfikowano {bity} LSB z {rozmiar_obrazu} bajtów obrazu  "
+                f"({bity / rozmiar_obrazu * 100:.2f}% bajtów tkniętych)"
             )
             self.lbl_wynik_ukrycia.setStyleSheet("color: #4ade80; font-weight: bold;")
             self.btn_odczytaj.setEnabled(True)
             self._wypelnij_wizualizacje(self._sciezka_stego, self.txt_po)
             self._pokaz_diff()
         except (ValueError, FileNotFoundError) as e:
-            self.lbl_wynik_ukrycia.setText(f"Blad: {e}")
+            self.lbl_wynik_ukrycia.setText(f"Błąd: {e}")
             self.lbl_wynik_ukrycia.setStyleSheet("color: #f87171;")
 
     def _odczytaj(self) -> None:
@@ -765,14 +601,14 @@ class ZakladkaSteganografia(QWidget):
             self.pole_odczyt.setText(tekst)
             ok = tekst == self.pole_wiad.text()
             self.lbl_wynik_odczytu.setText(
-                "Wiadomosc odczytana poprawnie — identyczna z oryginalem!"
-                if ok else "Uwaga: roznica miedzy oryginalem a odczytem"
+                "Wiadomość odczytana poprawnie — identyczna z oryginałem!"
+                if ok else "Uwaga: różnica między oryginałem a odczytem"
             )
             self.lbl_wynik_odczytu.setStyleSheet(
                 "color: #4ade80;" if ok else "color: #f87171;"
             )
         except Exception as e:
-            self.lbl_wynik_odczytu.setText(f"Blad odczytu: {e}")
+            self.lbl_wynik_odczytu.setText(f"Błąd odczytu: {e}")
             self.lbl_wynik_odczytu.setStyleSheet("color: #f87171;")
 
     def _fragment_pikseli(self, sciezka: str, n: int) -> bytes | None:
@@ -811,12 +647,12 @@ class ZakladkaSteganografia(QWidget):
         """Włącza/wyłącza przycisk wysyłania w zależności od stanu połączenia."""
         if polaczony:
             self.lbl_polaczenie_steg.setText(
-                "Polaczono z serwerem — oczekiwanie na sesje AES..."
+                "Połączono z serwerem — oczekiwanie na sesję AES..."
             )
             self.lbl_polaczenie_steg.setStyleSheet("color: #fbbf24; font-size: 9px;")
             self.btn_ukryj_i_wyslij.setEnabled(True)
         else:
-            self.lbl_polaczenie_steg.setText("Brak polaczenia z serwerem")
+            self.lbl_polaczenie_steg.setText("Brak połączenia z serwerem")
             self.lbl_polaczenie_steg.setStyleSheet("color: #9ca3af; font-size: 9px;")
             self.btn_ukryj_i_wyslij.setEnabled(False)
 
@@ -828,7 +664,7 @@ class ZakladkaSteganografia(QWidget):
             return  # nie polaczony — nie zmieniaj etykiety
         if klucz_aes:
             self.lbl_polaczenie_steg.setText(
-                "SECURE — wiadomosc bedzie szyfrowana AES-256, "
+                "SECURE — wiadomość będzie szyfrowana AES-256, "
                 "dopiero potem ukryta w LSB obrazu"
             )
             self.lbl_polaczenie_steg.setStyleSheet(
@@ -836,7 +672,7 @@ class ZakladkaSteganografia(QWidget):
             )
         else:
             self.lbl_polaczenie_steg.setText(
-                "Polaczono — brak sesji AES, wiadomosc trafi do LSB jako plaintext"
+                "Połączono — brak sesji AES, wiadomość trafi do LSB jako plaintext"
             )
             self.lbl_polaczenie_steg.setStyleSheet("color: #fbbf24; font-size: 9px;")
 
@@ -856,13 +692,13 @@ class ZakladkaSteganografia(QWidget):
         """Tworzy obraz 128×128, ukrywa wiadomość z Kroku 2 i emituje sygnał wysyłania."""
         wiad = self.pole_wiad.text().strip()
         if not wiad:
-            self.lbl_wynik_wysylki.setText("Wpisz wiadomosc w polu powyzej (Krok 2)")
+            self.lbl_wynik_wysylki.setText("Wpisz wiadomość w polu powyżej (Krok 2)")
             self.lbl_wynik_wysylki.setStyleSheet("color: #f87171;")
             return
 
         from secure_messenger.steganography.lsb import stworz_ppm, ukryj_wiadomosc
 
-        self.lbl_wynik_wysylki.setText("[STEG] Tworzenie obrazu z ukryta wiadomoscia...")
+        self.lbl_wynik_wysylki.setText("[STEG] Tworzenie obrazu z ukrytą wiadomością...")
         self.lbl_wynik_wysylki.setStyleSheet("color: #9ca3af;")
         try:
             tmpdir = tempfile.mkdtemp(prefix="steg_siec_")
@@ -886,13 +722,13 @@ class ZakladkaSteganografia(QWidget):
             with open(sc_stego, 'rb') as f:
                 ppm_dane = f.read()
             self.lbl_wynik_wysylki.setText(
-                f"[STEG/{tryb}] Obraz wysylany ({len(ppm_dane)} B, "
+                f"[STEG/{tryb}] Obraz wysłany ({len(ppm_dane)} B, "
                 f"payload {len(payload)} B)"
             )
             self.lbl_wynik_wysylki.setStyleSheet("color: #4ade80; font-weight: bold;")
             self.sygnal_wyslij_steg.emit(ppm_dane)
         except Exception as e:
-            self.lbl_wynik_wysylki.setText(f"[STEG] Blad: {e}")
+            self.lbl_wynik_wysylki.setText(f"[STEG] Błąd: {e}")
             self.lbl_wynik_wysylki.setStyleSheet("color: #f87171;")
 
     def _odczytaj_odebrany_steg(self) -> None:
@@ -931,7 +767,7 @@ class ZakladkaSteganografia(QWidget):
             )
             self.lbl_odebrany_status.setStyleSheet("color: #4ade80; font-weight: bold;")
         except Exception as e:
-            self.lbl_odebrany_status.setText(f"[STEG] Blad odczytu: {e}")
+            self.lbl_odebrany_status.setText(f"[STEG] Błąd odczytu: {e}")
             self.lbl_odebrany_status.setStyleSheet("color: #f87171;")
 
     # ------------------------------------------------------------------
@@ -947,13 +783,142 @@ class ZakladkaSteganografia(QWidget):
         tylko_lsb = all((a & 0xFE) == (b & 0xFE) for a, b in zip(oryg, stego))
         if tylko_lsb:
             self.lbl_diff.setText(
-                f"Analiza pierwszych {len(oryg)} bajtow: {zmienione} bajtow zmienionych, "
-                f"kazda zmiana wylacznie w bicie LSB (±1) — obraz wyglada identycznie"
+                f"Analiza pierwszych {len(oryg)} bajtów: {zmienione} bajtów zmienionych, "
+                f"każda zmiana wyłącznie w bicie LSB (±1) — obraz wygląda identycznie"
             )
             self.lbl_diff.setStyleSheet("color: #4ade80;")
         else:
-            self.lbl_diff.setText("Wykryto zmiany powyzej LSB!")
+            self.lbl_diff.setText("Wykryto zmiany powyżej LSB!")
             self.lbl_diff.setStyleSheet("color: #f87171;")
+
+
+# ---------------------------------------------------------------------------
+# ZAKŁADKA: ATAKI (ECB vs CBC + Replay bez nonce)
+# ---------------------------------------------------------------------------
+
+class ZakladkaAtaki(QWidget):
+    """Demonstracje podatności kryptograficznych — offline, bez serwera."""
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        tytul = QLabel("Analiza Bezpieczenstwa — Eksperymenty Kryptograficzne")
+        tytul.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        layout.addWidget(tytul)
+
+        # --- ECB vs CBC ---
+        grp_ecb = QGroupBox("Demo 1: ECB vs CBC — ujawnianie wzorcow w szyfrogramie")
+        lay_ecb = QVBoxLayout(grp_ecb)
+
+        opis_ecb = QLabel(
+            "ECB szyfruje kazdy 16-bajtowy blok niezaleznie tym samym kluczem.\n"
+            "Identyczne bloki plaintextu => identyczne bloki szyfrogramu => wzorzec widoczny bez klucza.\n"
+            "CBC XOR-uje kazdy blok z poprzednim szyfrogramem + losowy IV => brak wzorcow."
+        )
+        opis_ecb.setStyleSheet("color: #9ca3af; font-size: 9px;")
+        opis_ecb.setWordWrap(True)
+        lay_ecb.addWidget(opis_ecb)
+
+        row_ecb = QHBoxLayout()
+        self.combo_bloki = QComboBox()
+        self.combo_bloki.addItems(["4 bloki (64 B)", "8 blokow (128 B)", "16 blokow (256 B)"])
+        self.btn_ecb = QPushButton("Uruchom demo ECB vs CBC")
+        self.btn_ecb.setFixedWidth(210)
+        self.btn_ecb.setStyleSheet(
+            "QPushButton { background:#b45309; color:white; border:none; "
+            "padding:5px 12px; border-radius:5px; font-weight:bold; } "
+            "QPushButton:hover { background:#d97706; } "
+            "QPushButton:pressed { background:#92400e; }"
+        )
+        row_ecb.addWidget(QLabel("Liczba blokow:"))
+        row_ecb.addWidget(self.combo_bloki)
+        row_ecb.addStretch()
+        row_ecb.addWidget(self.btn_ecb)
+        lay_ecb.addLayout(row_ecb)
+
+        self.txt_ecb = QTextEdit()
+        self.txt_ecb.setReadOnly(True)
+        self.txt_ecb.setFont(QFont("Consolas", 9))
+        self.txt_ecb.setMaximumHeight(200)
+        self.txt_ecb.setPlaceholderText("Wyniki pojawia sie tutaj po kliknieciu przycisku...")
+        lay_ecb.addWidget(self.txt_ecb)
+        layout.addWidget(grp_ecb)
+
+        # --- Replay bez nonce ---
+        grp_replay = QGroupBox(
+            "Demo 2: Replay Attack — ten sam zaszyfrowany pakiet wyslany 3x"
+        )
+        lay_replay = QVBoxLayout(grp_replay)
+
+        opis_replay = QLabel(
+            "Atakujacy przechwytuje pakiet i wysyla go ponownie.\n"
+            "HMAC jest poprawny (pakiet nie byl modyfikowany), wiec BEZ nonce odbiorca akceptuje.\n"
+            "Z nonce: drugi odbior wykryty => pakiet odrzucony."
+        )
+        opis_replay.setStyleSheet("color: #9ca3af; font-size: 9px;")
+        opis_replay.setWordWrap(True)
+        lay_replay.addWidget(opis_replay)
+
+        row_replay = QHBoxLayout()
+        self.pole_wiad_replay = QLineEdit("Przelej 1000 zl na konto 12345")
+        self.btn_replay = QPushButton("Uruchom demo Replay")
+        self.btn_replay.setFixedWidth(180)
+        self.btn_replay.setStyleSheet(
+            "QPushButton { background:#7c3aed; color:white; border:none; "
+            "padding:5px 12px; border-radius:5px; font-weight:bold; } "
+            "QPushButton:hover { background:#6d28d9; } "
+            "QPushButton:pressed { background:#5b21b6; }"
+        )
+        row_replay.addWidget(QLabel("Wiadomosc:"))
+        row_replay.addWidget(self.pole_wiad_replay)
+        row_replay.addWidget(self.btn_replay)
+        lay_replay.addLayout(row_replay)
+
+        self.txt_replay = QTextEdit()
+        self.txt_replay.setReadOnly(True)
+        self.txt_replay.setFont(QFont("Consolas", 9))
+        self.txt_replay.setMaximumHeight(160)
+        self.txt_replay.setPlaceholderText("Wyniki pojawia sie tutaj po kliknieciu przycisku...")
+        lay_replay.addWidget(self.txt_replay)
+        layout.addWidget(grp_replay)
+
+        layout.addStretch()
+
+        self.btn_ecb.clicked.connect(self._uruchom_ecb)
+        self.btn_replay.clicked.connect(self._uruchom_replay)
+
+    def _uruchom_ecb(self) -> None:
+        liczba_blokow = [4, 8, 16][self.combo_bloki.currentIndex()]
+        self.btn_ecb.setEnabled(False)
+        self.txt_ecb.setPlaceholderText("Trwa szyfrowanie...")
+        try:
+            demo = DemoECBvsCBC()
+            wynik = demo.uruchom(liczba_blokow)
+            self.txt_ecb.setPlainText(demo.formatuj(wynik))
+            self._koloruj_wynik_ecb(wynik.identyczne_bloki_ecb, wynik.identyczne_bloki_cbc)
+        except Exception as e:
+            self.txt_ecb.setPlainText(f"Blad: {e}")
+        finally:
+            self.btn_ecb.setEnabled(True)
+
+    def _koloruj_wynik_ecb(self, ecb: int, cbc: int) -> None:
+        kursor = self.txt_ecb.textCursor()
+        kursor.movePosition(QTextCursor.MoveOperation.End)
+        self.txt_ecb.setTextCursor(kursor)
+
+    def _uruchom_replay(self) -> None:
+        wiad = self.pole_wiad_replay.text().strip() or "Przelej 1000 zl"
+        self.btn_replay.setEnabled(False)
+        try:
+            demo = DemoBezNonce()
+            wynik = demo.uruchom(wiad, powtorzenia=3)
+            self.txt_replay.setPlainText(demo.formatuj(wynik))
+        except Exception as e:
+            self.txt_replay.setPlainText(f"Blad: {e}")
+        finally:
+            self.btn_replay.setEnabled(True)
 
 
 # ---------------------------------------------------------------------------
@@ -980,8 +945,8 @@ class _PasekGorny(QWidget):
         lbl_rola.setFixedWidth(70)
         layout.addWidget(lbl_rola)
 
-        # Badge polaczenia
-        self.badge_pol = self._badge("ROZLACZONA", "#e74c3c")
+        # Badge połączenia
+        self.badge_pol = self._badge("ROZŁĄCZONA", "#e74c3c")
         layout.addWidget(self.badge_pol)
 
         # Badge sesji
@@ -990,8 +955,8 @@ class _PasekGorny(QWidget):
 
         layout.addStretch()
 
-        # Przycisk Polacz
-        self.btn_polacz = QPushButton("Polacz")
+        # Przycisk Połącz
+        self.btn_polacz = QPushButton("Połącz")
         self.btn_polacz.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self.btn_polacz.setStyleSheet("""
             QPushButton          { background:#16a34a; color:white; border:none;
@@ -1003,8 +968,8 @@ class _PasekGorny(QWidget):
         self.btn_polacz.setFixedHeight(34)
         layout.addWidget(self.btn_polacz)
 
-        # Przycisk Rozlacz
-        self.btn_rozlacz = QPushButton("Rozlacz")
+        # Przycisk Rozłącz
+        self.btn_rozlacz = QPushButton("Rozłącz")
         self.btn_rozlacz.setFont(QFont("Segoe UI", 10))
         self.btn_rozlacz.setStyleSheet("""
             QPushButton          { background:#dc2626; color:white; border:none;
@@ -1039,7 +1004,7 @@ class _PasekGorny(QWidget):
                     outline: none;
                 }
             """)
-            self.btn_wymiana = QPushButton("Wymien klucze RSA")
+            self.btn_wymiana = QPushButton("Wymień klucze RSA")
             self.btn_wymiana.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
             self.btn_wymiana.setStyleSheet("""
                 QPushButton          { background:#7c3aed; color:white; border:none;
@@ -1067,7 +1032,7 @@ class _PasekGorny(QWidget):
 
     def ustaw_polaczony(self, polaczony: bool) -> None:
         if polaczony:
-            self.badge_pol.setText("POLACZONA" if self.rola == "alice" else "POLACZONY")
+            self.badge_pol.setText("POŁĄCZONA" if self.rola == "alice" else "POŁĄCZONY")
             self.badge_pol.setStyleSheet(
                 "background: #27ae60; color: white; padding: 3px 10px; "
                 "border-radius: 10px; margin: 0 4px;"
@@ -1075,13 +1040,13 @@ class _PasekGorny(QWidget):
             self.btn_polacz.setEnabled(False)
             self.btn_rozlacz.setEnabled(True)
         else:
-            self.badge_pol.setText("ROZLACZONA" if self.rola == "alice" else "ROZLACZONY")
+            self.badge_pol.setText("ROZŁĄCZONA" if self.rola == "alice" else "ROZŁĄCZONY")
             self.badge_pol.setStyleSheet(
                 "background: #e74c3c; color: white; padding: 3px 10px; "
                 "border-radius: 10px; margin: 0 4px;"
             )
             self.btn_polacz.setEnabled(True)
-            self.btn_polacz.setText("Polacz")
+            self.btn_polacz.setText("Połącz")
             self.btn_rozlacz.setEnabled(False)
 
     def ustaw_bezpieczny(self, bezpieczny: bool) -> None:
@@ -1106,7 +1071,7 @@ class _PasekGorny(QWidget):
 class OknoKlienta(QMainWindow):
     """
     Okno jednego uczestnika (Alice albo Bob).
-    Dwa osobne okna = pelna komunikacja przez serwer.
+    Dwa osobne okna = pełna komunikacja przez serwer.
     """
 
     def __init__(self, rola: str, port: int = 9999):
@@ -1141,9 +1106,9 @@ class OknoKlienta(QMainWindow):
         self.tabs = QTabWidget()
         self.czat     = ZakladkaCzat(rola)
         self.krypto   = ZakladkaKryptografia(rola)
-        self.sec_lab  = ZakladkaSecurityLab()
         self.bench    = ZakladkaBenchmarki()
         self.stego    = ZakladkaSteganografia()
+        self.ataki    = ZakladkaAtaki()
         # Zakładka steganografii w QScrollArea — zawartość jest wyższa niż minimalne okno
         _stego_scroll = QScrollArea()
         _stego_scroll.setWidgetResizable(True)
@@ -1151,8 +1116,8 @@ class OknoKlienta(QMainWindow):
 
         self.tabs.addTab(self.czat,     "Czat")
         self.tabs.addTab(self.krypto,   "Kryptografia / RSA Lab")
-        self.tabs.addTab(self.sec_lab,  "Security Lab")
         self.tabs.addTab(self.bench,    "Benchmarki")
+        self.tabs.addTab(self.ataki,    "Ataki / Analiza")
         self.tabs.addTab(_stego_scroll, "Steganografia")
         main_layout.addWidget(self.tabs)
 
@@ -1170,10 +1135,6 @@ class OknoKlienta(QMainWindow):
         self.bench.btn_start.clicked.connect(self._uruchom_benchmarki)
         if self.pasek.btn_wymiana:
             self.pasek.btn_wymiana.clicked.connect(self._inicjuj_wymiane)
-        # Security Lab
-        self.sec_lab.btn_replay.clicked.connect(self._uruchom_replay)
-        self.sec_lab.btn_bez_nonce.clicked.connect(self._uruchom_demo_bez_nonce)
-        self.sec_lab.btn_mitm.clicked.connect(self._uruchom_mitm)
         # Steganografia — sygnał wysyłania z zakładki do klienta sieciowego
         self.stego.sygnal_wyslij_steg.connect(self._wyslij_steg)
 
@@ -1185,7 +1146,7 @@ class OknoKlienta(QMainWindow):
         if self._polaczony:
             return
         self.pasek.btn_polacz.setEnabled(False)
-        self.pasek.btn_polacz.setText("Laczenie...")
+        self.pasek.btn_polacz.setText("Łączenie...")
 
         # Odlacz sygnaly starego watku przed zastapnieniem.
         # Bez tego stary WatekKlienta moze pozniej wyemitowac sygnal_rozlaczony
@@ -1232,12 +1193,12 @@ class OknoKlienta(QMainWindow):
         self.pasek.ustaw_polaczony(ok)
         self.stego.ustaw_polaczony(ok)
         if ok:
-            self.pasek.btn_polacz.setText("Polaczono")
-            self.krypto.dodaj_krok(self.rola[0].upper(), f"Polaczono z serwerem jako '{self.rola}'")
+            self.pasek.btn_polacz.setText("Połączono")
+            self.krypto.dodaj_krok(self.rola[0].upper(), f"Połączono z serwerem jako '{self.rola}'")
             if self.rola == 'bob' and self.pasek.btn_wymiana:
                 self.pasek.btn_wymiana.setEnabled(True)
         else:
-            self.krypto.dodaj_krok("!", "Blad polaczenia z serwerem")
+            self.krypto.dodaj_krok("!", "Błąd połączenia z serwerem")
 
     def _na_status(self, s: str) -> None:
         self.krypto.dodaj_krok(self.rola[0].upper(), s)
@@ -1276,23 +1237,23 @@ class OknoKlienta(QMainWindow):
             self.stego.ustaw_klucze_sesji(k._klucz_aes, k._klucz_hmac)
 
     def _na_wiadomosc(self, nadawca: str, tresc: str) -> None:
-        """Odebrana wiadomosc od DRUGIEJ strony — wyswietl u odbiorcy."""
+        """Odebrana wiadomość od drugiej strony — wyświetl u odbiorcy."""
         self.czat.dodaj_wiadomosc(nadawca.capitalize(), tresc, self._kolor_oni)
 
     def _rozlacz(self) -> None:
         if self._moj_watek and self._moj_watek.klient:
             self._moj_watek.klient.rozlacz()
-        self.krypto.dodaj_krok("INFO", "Polaczenie zamkniete przez uzytkownika")
+        self.krypto.dodaj_krok("INFO", "Połączenie zamknięte przez użytkownika")
         self._reset_stanu()
 
     def _na_rozlaczenie(self) -> None:
-        """Wywoływany gdy wątek sieciowy konczy petle (utrata polaczenia)."""
+        """Wywoływany gdy wątek sieciowy kończy pętlę (utrata połączenia)."""
         if self._polaczony:
-            self.krypto.dodaj_krok("INFO", "Polaczenie z serwerem utracone")
+            self.krypto.dodaj_krok("INFO", "Połączenie z serwerem utracone")
         self._reset_stanu()
 
     def _reset_stanu(self) -> None:
-        """Przywraca UI do stanu 'rozlaczony' — umozliwia ponowne polaczenie."""
+        """Przywraca UI do stanu 'rozłączony' — umożliwia ponowne połączenie."""
         # Zachowaj KlientMessenger — klucze sesji przezyja reconnect i pozwola
         # odszyfrować wiadomości zakolejkowane na serwerze podczas offline.
         if self._moj_watek and self._moj_watek.klient:
@@ -1358,62 +1319,6 @@ class OknoKlienta(QMainWindow):
         )
 
     # ------------------------------------------------------------------
-    # SECURITY LAB
-    # ------------------------------------------------------------------
-
-    def _uruchom_replay(self) -> None:
-        self.sec_lab.log_replay.clear()
-        self.sec_lab.btn_replay.setEnabled(False)
-        wiad = self.sec_lab.pole_wiad_replay.text() or "Przelej 1000 zl"
-
-        self._watek_replay = WatekAtaku("replay", {"wiadomosc": wiad, "ile_replay": 3})
-        self._watek_replay.sygnal_krok.connect(
-            lambda nr, op: self.sec_lab.dodaj_krok(self.sec_lab.log_replay, nr, op)
-        )
-        self._watek_replay.sygnal_gotowy.connect(lambda p: self._na_koniec_ataku(
-            self.sec_lab.lbl_wynik_replay, self.sec_lab.btn_replay, p, kolor_sukces="#27ae60"
-        ))
-        self._watek_replay.start()
-
-    def _uruchom_demo_bez_nonce(self) -> None:
-        self.sec_lab.log_bez_nonce.clear()
-        self.sec_lab.btn_bez_nonce.setEnabled(False)
-        wiad = "Przelej 500 zl na konto Ewy"
-
-        self._watek_demo = WatekAtaku("demo_bez_nonce", {"wiadomosc": wiad})
-        self._watek_demo.sygnal_krok.connect(
-            lambda nr, op: self.sec_lab.dodaj_krok(self.sec_lab.log_bez_nonce, nr, op)
-        )
-        self._watek_demo.sygnal_gotowy.connect(lambda p: self._na_koniec_ataku(
-            self.sec_lab.lbl_wynik_demo, self.sec_lab.btn_bez_nonce, p, kolor_sukces="#c0392b"
-        ))
-        self._watek_demo.start()
-
-    def _uruchom_mitm(self) -> None:
-        self.sec_lab.log_mitm.clear()
-        self.sec_lab.btn_mitm.setEnabled(False)
-        bity = 512 if self.sec_lab.combo_bity_mitm.currentIndex() == 0 else 1024
-        modyfikuj = self.sec_lab.combo_tryb.currentIndex() == 1
-
-        self._watek_mitm = WatekAtaku("mitm", {
-            "wiadomosci": ["Przelej 1000 zl na konto 123", "Haslo: SuperSecret"],
-            "modyfikacja": (lambda t: t.replace("1000", "9999")) if modyfikuj else None,
-            "bity": bity,
-        })
-        self._watek_mitm.sygnal_krok.connect(
-            lambda nr, op: self.sec_lab.dodaj_krok(self.sec_lab.log_mitm, nr, op)
-        )
-        self._watek_mitm.sygnal_gotowy.connect(lambda p: self._na_koniec_ataku(
-            self.sec_lab.lbl_wynik_mitm, self.sec_lab.btn_mitm, p, kolor_sukces="#c0392b"
-        ))
-        self._watek_mitm.start()
-
-    def _na_koniec_ataku(self, lbl: QLabel, btn: QPushButton, podsum: str, kolor_sukces: str) -> None:
-        lbl.setText(podsum)
-        lbl.setStyleSheet(f"color: {kolor_sukces}; font-weight: bold;")
-        btn.setEnabled(True)
-
-    # ------------------------------------------------------------------
     # BENCHMARKI
     # ------------------------------------------------------------------
 
@@ -1431,7 +1336,7 @@ class OknoKlienta(QMainWindow):
         self.bench.pokaz_wyniki(raport)
         self.bench.pasek.setVisible(False)
         self.bench.btn_start.setEnabled(True)
-        self.bench.lbl_postep.setText(f"Gotowe! Czas: {raport.czas_calkowity_s:.1f}s")
+        self.bench.lbl_postep.setText(f"Gotowe. Czas: {raport.czas_calkowity_s:.1f}s")
 
     # ------------------------------------------------------------------
 
